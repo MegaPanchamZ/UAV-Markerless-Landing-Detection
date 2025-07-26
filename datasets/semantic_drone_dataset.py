@@ -316,30 +316,33 @@ class SemanticDroneDataset(Dataset):
             if self.label_cache is not None:
                 self.label_cache[file_idx] = label
         
-        # Random cropping for speed and detail preservation
+        # FIXED: 1024x1024 crops then resize to target resolution (better context)
         if self.use_random_crops and self.split == "train":
-            # Take random crops from the high-resolution image
-            crop_h, crop_w = self.target_resolution
+            # Take 1024x1024 crops from the high-resolution image for better context
+            crop_size = 1024
             img_h, img_w = image.shape[:2]
             
             # Ensure crop size doesn't exceed image size
-            crop_h = min(crop_h, img_h)
-            crop_w = min(crop_w, img_w)
+            crop_size = min(crop_size, min(img_h, img_w))
             
             # Random crop coordinates
-            if img_h > crop_h:
-                start_h = np.random.randint(0, img_h - crop_h + 1)
+            if img_h > crop_size:
+                start_h = np.random.randint(0, img_h - crop_size + 1)
             else:
                 start_h = 0
             
-            if img_w > crop_w:
-                start_w = np.random.randint(0, img_w - crop_w + 1)
+            if img_w > crop_size:
+                start_w = np.random.randint(0, img_w - crop_size + 1)
             else:
                 start_w = 0
             
-            # Extract crop
-            image = image[start_h:start_h + crop_h, start_w:start_w + crop_w]
-            label = label[start_h:start_h + crop_h, start_w:start_w + crop_w]
+            # Extract 1024x1024 crop
+            image = image[start_h:start_h + crop_size, start_w:start_w + crop_size]
+            label = label[start_h:start_h + crop_size, start_w:start_w + crop_size]
+            
+            # Resize to target resolution (e.g., 256x256)
+            image = cv2.resize(image, self.target_resolution[::-1], interpolation=cv2.INTER_LINEAR)
+            label = cv2.resize(label, self.target_resolution[::-1], interpolation=cv2.INTER_NEAREST)
         else:
             # For validation/test, resize to target resolution
             image = cv2.resize(image, self.target_resolution[::-1], interpolation=cv2.INTER_LINEAR)
@@ -519,29 +522,33 @@ class SemanticDroneDataset(Dataset):
     
     def _apply_random_crop_numpy(self, image: np.ndarray, mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        OPTIMIZATION: Apply random crop directly on numpy arrays without PIL conversion.
+        FIXED: Apply 1024x1024 crop then resize to target resolution.
         """
-        crop_h, crop_w = self.target_resolution
+        # Take 1024x1024 crop for better context
+        crop_size = 1024
         img_h, img_w = image.shape[:2]
         
         # Ensure crop doesn't exceed image size
-        crop_h = min(crop_h, img_h)
-        crop_w = min(crop_w, img_w)
+        crop_size = min(crop_size, min(img_h, img_w))
         
         # Random crop coordinates
-        if img_h > crop_h:
-            start_h = np.random.randint(0, img_h - crop_h + 1)
+        if img_h > crop_size:
+            start_h = np.random.randint(0, img_h - crop_size + 1)
         else:
             start_h = 0
         
-        if img_w > crop_w:
-            start_w = np.random.randint(0, img_w - crop_w + 1)
+        if img_w > crop_size:
+            start_w = np.random.randint(0, img_w - crop_size + 1)
         else:
             start_w = 0
         
-        # Extract crop directly from numpy arrays
-        image_crop = image[start_h:start_h + crop_h, start_w:start_w + crop_w]
-        mask_crop = mask[start_h:start_h + crop_h, start_w:start_w + crop_w]
+        # Extract 1024x1024 crop
+        image_crop = image[start_h:start_h + crop_size, start_w:start_w + crop_size]
+        mask_crop = mask[start_h:start_h + crop_size, start_w:start_w + crop_size]
+        
+        # Resize to target resolution (e.g., 256x256)
+        image_crop = cv2.resize(image_crop, self.target_resolution[::-1], interpolation=cv2.INTER_LINEAR)
+        mask_crop = cv2.resize(mask_crop, self.target_resolution[::-1], interpolation=cv2.INTER_NEAREST)
         
         return image_crop, mask_crop
 

@@ -441,23 +441,18 @@ class UniversalTrainer:
                 print("📊 Computing class weights...")
                 base_weights = train_dataset.get_class_weights().to(self.device)
                 
-                # Apply EdgeLandingNet-style class weighting
-                # For extremely rare classes, use more aggressive weighting
-                class_weights = torch.sqrt(base_weights)
+                # FIXED: More stable class weighting to prevent training instability
+                # Use gentler weighting to avoid extreme gradients
+                class_weights = torch.sqrt(torch.sqrt(base_weights))  # Fourth root for gentler weighting
                 
-                # Apply safety multipliers like successful EdgeLandingNet approach
+                # Apply moderate safety multipliers (reduced from previous extreme values)
                 if len(class_weights) >= 6:
-                    # Check for extremely rare classes and boost them more
-                    for i, weight in enumerate(base_weights):
-                        if weight > 50:  # Very high inverse frequency weight = very rare class
-                            class_weights[i] *= 3.0  # Boost extremely rare classes more
-                    
-                    class_weights[3] *= 2.0  # Emphasize water/hazard detection (class 3)
-                    class_weights[4] *= 2.5  # Extra emphasis on car detection (extremely rare)
-                    class_weights[2] *= 1.5  # More emphasis on building detection (very rare)
+                    class_weights[3] *= 1.5  # Water (reduced from 2.0)
+                    class_weights[4] *= 2.0  # Car (reduced from 2.5 * 3.0 = 7.5)
+                    class_weights[2] *= 1.2  # Building (reduced from 1.5)
                 
-                # Cap maximum weight to prevent instability, but allow higher for rare classes
-                class_weights = torch.clamp(class_weights, min=0.1, max=20.0)  # Higher cap for extremely rare classes
+                # CRITICAL: Cap maximum weight much lower to prevent instability
+                class_weights = torch.clamp(class_weights, min=0.5, max=5.0)  # Much lower max weight
                 
                 print(f"   Base weights: {base_weights.cpu().numpy()}")
                 print(f"   Balanced weights: {class_weights.cpu().numpy()}")
@@ -559,7 +554,7 @@ class UniversalTrainer:
         max_grad_norm = 1.0
         
         # FIXED: Add early stopping to prevent overfitting (increased patience)
-        early_stopping_patience = max(15, num_epochs // 2)  # Even more patience for EdgeLandingNet learning
+        early_stopping_patience = max(20, num_epochs)  # Much more patience for extreme imbalance  # Even more patience for EdgeLandingNet learning
         epochs_without_improvement = 0
         
         # Initialize W&B for this stage
@@ -1218,7 +1213,7 @@ def main():
             )
             
             # FIXED: Better learning rate for stage 1 (increased for EdgeLandingNet)
-            stage1_lr = 1e-3 if args.epochs <= 30 else 2e-3  # Higher LR for faster convergence
+            stage1_lr = 5e-4 if args.epochs <= 30 else 1e-3  # Reduced LR for stability with extreme imbalance
             
             results = trainer.train_stage(
                 stage=1,
