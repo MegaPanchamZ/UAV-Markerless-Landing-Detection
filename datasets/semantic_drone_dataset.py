@@ -325,16 +325,28 @@ class SemanticDroneDataset(Dataset):
             # Ensure crop size doesn't exceed image size
             crop_size = min(crop_size, min(img_h, img_w))
             
-            # Random crop coordinates
-            if img_h > crop_size:
-                start_h = np.random.randint(0, img_h - crop_size + 1)
-            else:
-                start_h = 0
+            # Better crop sampling: mix of random and systematic for coverage
+            crop_idx = idx % self.crops_per_image
             
-            if img_w > crop_size:
-                start_w = np.random.randint(0, img_w - crop_size + 1)
-            else:
+            if crop_idx == 0:
+                # First crop: top-left corner
+                start_h, start_w = 0, 0
+            elif crop_idx == 1:
+                # Second crop: top-right corner
+                start_h = 0
+                start_w = max(0, img_w - crop_size)
+            elif crop_idx == 2:
+                # Third crop: bottom-left corner
+                start_h = max(0, img_h - crop_size)
                 start_w = 0
+            elif crop_idx == 3:
+                # Fourth crop: center
+                start_h = max(0, (img_h - crop_size) // 2)
+                start_w = max(0, (img_w - crop_size) // 2)
+            else:
+                # Additional crops: random
+                start_h = np.random.randint(0, max(1, img_h - crop_size + 1))
+                start_w = np.random.randint(0, max(1, img_w - crop_size + 1))
             
             # Extract 1024x1024 crop
             image = image[start_h:start_h + crop_size, start_w:start_w + crop_size]

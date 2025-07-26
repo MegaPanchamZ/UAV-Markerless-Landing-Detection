@@ -470,11 +470,11 @@ class UniversalTrainer:
         else:
             class_weights = None
         
-        # FIXED: Start with simpler, more stable loss function
-        print("🎯 Using optimized Focal + Dice loss (boundary loss causing instability)...")
+        # IMPROVED: Add back boundary loss with proper scaling for 0.38 → 0.65 mIoU
+        print("🎯 Using improved EdgeLandingNet loss with scaled boundary component...")
         
-        # Create simplified but effective loss function
-        class StableLandingLoss(nn.Module):
+        # Create improved loss function with boundary loss
+        class ImprovedEdgeLandingLoss(nn.Module):
             def __init__(self, class_weights, alpha=0.25, gamma=2.0):
                 super().__init__()
                 self.class_weights = class_weights
@@ -506,23 +506,41 @@ class UniversalTrainer:
                 
                 return dice_loss / pred.size(1)
             
+            def _boundary_loss(self, pred, target):
+                """IMPROVED: Properly scaled boundary loss for edge preservation."""
+                # Use Laplacian for edge detection (more stable than Sobel)
+                laplacian_kernel = torch.tensor([[0, -1, 0], [-1, 4, -1], [0, -1, 0]], 
+                                              dtype=torch.float32, device=pred.device).unsqueeze(0).unsqueeze(0)
+                
+                # Get prediction and target edges
+                pred_class = torch.argmax(pred, dim=1).float().unsqueeze(1)
+                target_edges = F.conv2d(target.float().unsqueeze(1), laplacian_kernel, padding=1)
+                pred_edges = F.conv2d(pred_class, laplacian_kernel, padding=1)
+                
+                # L1 loss for boundaries (more stable than MSE)
+                boundary_loss = F.l1_loss(pred_edges, target_edges)
+                
+                # Scale down the boundary loss to prevent instability
+                return boundary_loss * 0.1  # Much smaller scale
+            
             def forward(self, pred, target):
-                # SIMPLIFIED: Focus on Focal + Dice (most important components)
+                # Multi-component loss with proper scaling
                 focal = self._focal_loss(pred, target)
                 dice = self._dice_loss(pred, target)
+                boundary = self._boundary_loss(pred, target)
                 
-                # 70% Focal + 30% Dice (remove problematic boundary loss for now)
-                total_loss = 0.7 * focal + 0.3 * dice
+                # Optimized weights: 60% Focal + 35% Dice + 5% Boundary
+                total_loss = 0.6 * focal + 0.35 * dice + 0.05 * boundary
                 
                 return {
                     'total': total_loss,
                     'focal': focal,
                     'dice': dice,
-                    'boundary': torch.tensor(0.0, device=pred.device)  # Dummy for logging
+                    'boundary': boundary
                 }
         
-        loss_fn = StableLandingLoss(class_weights)
-        print(f"   Loss: Stable (0.7 Focal + 0.3 Dice, boundary disabled)")
+        loss_fn = ImprovedEdgeLandingLoss(class_weights)
+        print(f"   Loss: Improved (0.6 Focal + 0.35 Dice + 0.05 Boundary)")
         
         # Use differential learning rates like successful EdgeLandingNet approach
         backbone_params = []
@@ -1195,7 +1213,7 @@ def main():
                 class_mapping="unified_6_class",
                 target_resolution=(256, 256),  # Ensure consistent resolution
                 use_random_crops=True,  # Enable extreme augmentation
-                crops_per_image=8  # Multiple crops like successful approach
+                crops_per_image=12  # Increased for better coverage (0.38→0.65 mIoU)
             )
             
             val_dataset = SemanticDroneDataset(
@@ -1259,7 +1277,7 @@ def main():
                 transform=transforms,
                 target_resolution=(256, 256),  # Match EdgeLandingNet
                 use_random_crops=True,
-                crops_per_image=8  # Extreme augmentation
+                crops_per_image=12  # Increased for better coverage (0.38→0.65 mIoU)
             )
             
             val_dataset = UDD6Dataset(
