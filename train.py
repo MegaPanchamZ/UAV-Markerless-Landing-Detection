@@ -1097,6 +1097,12 @@ def main():
     parser.add_argument('--profile-dataloader', action='store_true',
                         help='Run a quick benchmark on the DataLoader and exit.')
     
+    # PERFORMANCE FIX: Add emergency performance mode
+    parser.add_argument('--force-single-worker', action='store_true',
+                        help='Force num_workers=0 for DroneDeploy dataset (emergency performance fix)')
+    parser.add_argument('--force-preload', action='store_true',
+                        help='Force preloading all data into memory (uses more RAM but much faster)')
+    
     args = parser.parse_args()
     
     print("🚁 UAV Landing System - Universal Training")
@@ -1117,6 +1123,12 @@ def main():
         config['persistent_workers'] = config['device'] == 'cuda' and config['num_workers'] > 0
     if args.device:
         config['device'] = args.device
+    
+    # PERFORMANCE FIX: Emergency single-worker mode for DroneDeploy
+    if args.force_single_worker and args.stage == 2:
+        config['num_workers'] = 0
+        config['persistent_workers'] = False
+        print("   🚨 EMERGENCY MODE: Using single-worker loading for DroneDeploy dataset")
     
     # FIXED: Additional Windows safety check
     if platform.system() == 'Windows' and config['num_workers'] > 0:
@@ -1245,14 +1257,24 @@ def main():
         elif args.stage == 2:
             print(f"\n🚀 Running Stage 2: Landing Specialization")
             
+            # PERFORMANCE FIX: Reduce workers for DroneDeploy dataset to avoid I/O contention
+            original_workers = config['num_workers']
+            if config['num_workers'] > 1:
+                config['num_workers'] = max(1, config['num_workers'] // 2)
+                print(f"   🔧 PERFORMANCE: Reducing workers from {original_workers} to {config['num_workers']} for DroneDeploy dataset")
+            
             datasets = create_dronedeploy_datasets(
                 data_root=args.dronedeploy_data_root,
                 patch_size=256,  # Match EdgeLandingNet input size
-                augmentation=True
+                augmentation=True,
+                force_preload=args.force_preload  # PERFORMANCE FIX
             )
             
             # FIXED: Better learning rate for stage 2
             stage2_lr = 1e-4 if args.epochs <= 30 else 5e-4
+            
+            # Update trainer config for this stage
+            trainer.config['num_workers'] = config['num_workers']
             
             results = trainer.train_stage(
                 stage=2,

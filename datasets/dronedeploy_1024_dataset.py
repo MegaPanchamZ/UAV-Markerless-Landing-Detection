@@ -79,7 +79,8 @@ class DroneDeploy1024Dataset(Dataset):
         min_valid_pixels: float = 0.1,
         augmentation: bool = True,
         edge_enhancement: bool = False,
-        cache_patches: bool = True  # Enable caching
+        cache_patches: bool = True,  # Enable caching
+        force_preload: bool = False  # PERFORMANCE FIX: Force preloading option
     ):
         self.data_root = Path(data_root)
         self.split = split
@@ -89,6 +90,7 @@ class DroneDeploy1024Dataset(Dataset):
         self.augmentation = augmentation
         self.edge_enhancement = edge_enhancement
         self.cache_patches = cache_patches
+        self.force_preload = force_preload
         
         # Paths
         self.images_dir = self.data_root / 'images'
@@ -127,9 +129,50 @@ class DroneDeploy1024Dataset(Dataset):
         
         # Batch cache for on-demand loading
         self._batch_cache = {}
-        self._max_cached_batches = 3  # Keep max 3 batches in memory
+        self._max_cached_batches = max(50, len(self.patches) // 100)  # PERFORMANCE FIX: Much larger cache
+        
+        # PERFORMANCE FIX: Add option to preload all data for training
+        should_preload = (
+            self.force_preload or 
+            (self.split == 'train' and len(self.patches) < 10000)  # Increased threshold
+        )
+        
+        if should_preload:
+            print(f"   🚀 PERFORMANCE MODE: Pre-loading all training patches into memory...")
+            self._preload_all_patches()
         
         print(f"   Split {split}: {len(self.patches)} patches")
+        print(f"   Batch cache size: {self._max_cached_batches}")
+        print(f"   Preloaded: {hasattr(self, '_preloaded_patches')}")
+    
+    def _preload_all_patches(self):
+        """Pre-load all patches into memory for maximum training speed."""
+        self._preloaded_patches = {}
+        
+        print(f"   Loading {len(self.patches)} patches...")
+        for i, patch_metadata in enumerate(tqdm(self.patches, desc="Pre-loading")):
+            if 'batch_file' in patch_metadata:
+                batch_file = patch_metadata['batch_file']
+                patch_id = patch_metadata['patch_id']
+                
+                # Load batch if not cached
+                if batch_file not in self._batch_cache:
+                    self._load_batch(batch_file)
+                
+                # Find and store the actual patch data
+                batch_patches = self._batch_cache[batch_file]
+                for patch in batch_patches:
+                    if patch['patch_id'] == patch_id:
+                        self._preloaded_patches[patch_id] = {
+                            'image_patch': patch['image_patch'].copy(),
+                            'label_patch': patch['label_patch'].copy(),
+                            'edge_map': patch.get('edge_map', None)
+                        }
+                        break
+        
+        print(f"   ✅ Pre-loaded {len(self._preloaded_patches)} patches into memory")
+        # Clear batch cache to save memory since we have preloaded data
+        self._batch_cache.clear()
     
     def _get_cache_file(self) -> Path:
         """Get cache file path based on parameters."""
@@ -578,12 +621,19 @@ class DroneDeploy1024Dataset(Dataset):
         """Get a patch by index - loads patch data on-demand."""
         
         patch_metadata = self.patches[idx]
+        patch_id = patch_metadata['patch_id']
+        
+        # PERFORMANCE FIX: Use preloaded data if available
+        if hasattr(self, '_preloaded_patches') and patch_id in self._preloaded_patches:
+            preloaded = self._preloaded_patches[patch_id]
+            image = preloaded['image_patch'].copy()
+            mask = preloaded['label_patch'].copy()
+            edge_map = preloaded.get('edge_map')
         
         # Check if this is metadata (new format) or actual patch data (legacy)
-        if 'batch_file' in patch_metadata:
+        elif 'batch_file' in patch_metadata:
             # New metadata format - load actual patch data on-demand
             batch_file = patch_metadata['batch_file']
-            patch_id = patch_metadata['patch_id']
             
             # Load batch if not cached
             if batch_file not in self._batch_cache:
@@ -603,11 +653,13 @@ class DroneDeploy1024Dataset(Dataset):
             # Get patches from actual patch data
             image = actual_patch['image_patch'].copy()
             mask = actual_patch['label_patch'].copy()
+            edge_map = actual_patch.get('edge_map')
             
         else:
             # Legacy format - patch data is directly available
             image = patch_metadata['image_patch'].copy()
             mask = patch_metadata['label_patch'].copy()
+            edge_map = patch_metadata.get('edge_map')
         
         # Apply augmentations
         if self.transform:
@@ -629,20 +681,10 @@ class DroneDeploy1024Dataset(Dataset):
         }
         
         # Add edge map if available
-        if 'batch_file' in patch_metadata:
-            # For new format, check actual patch
-            if actual_patch and 'edge_map' in actual_patch:
-                edge_map = actual_patch['edge_map']
-                if not isinstance(edge_map, torch.Tensor):
-                    edge_map = torch.from_numpy(edge_map).float()
-                result['edge_map'] = edge_map
-        else:
-            # For legacy format
-            if 'edge_map' in patch_metadata:
-                edge_map = patch_metadata['edge_map']
-                if not isinstance(edge_map, torch.Tensor):
-                    edge_map = torch.from_numpy(edge_map).float()
-                result['edge_map'] = edge_map
+        if edge_map is not None:
+            if not isinstance(edge_map, torch.Tensor):
+                edge_map = torch.from_numpy(edge_map).float()
+            result['edge_map'] = edge_map
         
         return result
     
@@ -744,6 +786,7 @@ class DroneDeploy1024Dataset(Dataset):
 def create_dronedeploy_datasets(
     data_root: str,
     patch_size: int = 1024,
+    force_preload: bool = False,  # PERFORMANCE FIX
     **kwargs
 ) -> Dict[str, DroneDeploy1024Dataset]:
     """
@@ -752,6 +795,7 @@ def create_dronedeploy_datasets(
     Args:
         data_root: Root directory containing DroneDeploy data
         patch_size: Patch size (1024 following research)
+        force_preload: Force preloading all data into memory for training speed
         **kwargs: Additional dataset parameters
         
     Returns:
@@ -766,6 +810,7 @@ def create_dronedeploy_datasets(
                 data_root=data_root,
                 split=split,
                 patch_size=patch_size,
+                force_preload=force_preload and split == 'train',  # Only preload training data
                 **kwargs
             )
             datasets[split] = dataset
