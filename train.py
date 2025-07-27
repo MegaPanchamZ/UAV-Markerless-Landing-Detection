@@ -303,7 +303,7 @@ class MultiDatasetLoss(nn.Module):
     
     def _focal_loss(self, pred, target, class_weights=None):
         """Focal loss for handling class imbalance."""
-        ce_loss = F.cross_entropy(pred, target, weight=class_weights, reduction='none')
+        ce_loss = F.cross_entropy(pred, target, weight=class_weights, reduction='none', ignore_index=255)
         pt = torch.exp(-ce_loss)
         focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
         return focal_loss.mean()
@@ -514,7 +514,7 @@ class UniversalTrainer:
             
             def _focal_loss(self, pred, target):
                 """Focal loss for class imbalance."""
-                ce_loss = F.cross_entropy(pred, target, weight=self.class_weights, reduction='none')
+                ce_loss = F.cross_entropy(pred, target, weight=self.class_weights, reduction='none', ignore_index=255)
                 pt = torch.exp(-ce_loss)
                 focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
                 return focal_loss.mean()
@@ -1268,7 +1268,7 @@ def main():
             print(f"   From: {previous_checkpoint}")
             
             try:
-                checkpoint = torch.load(previous_checkpoint, map_location='cpu')
+                checkpoint = torch.load(previous_checkpoint, map_location='cpu', weights_only=False)
                 
                 # Check if we need to adapt model architecture (class count change)
                 prev_num_classes = get_num_classes_for_stage(previous_stage)
@@ -1465,8 +1465,8 @@ def main():
             print(f"   📈 Training with {len(train_dataset)} samples, {len(val_dataset)} validation")
             print(f"   🏷️  Using 6-class urban domain scheme")
             
-            # Stage 3: Fine-tuning learning rate - very low for careful adaptation
-            stage3_lr = 1e-5 if args.epochs <= 30 else 3e-5
+            # Stage 3: Fine-tuning learning rate - FIXED: more aggressive for proper adaptation
+            stage3_lr = 1e-3 if args.epochs <= 30 else 2e-3
             
             results = trainer.train_stage(
                 stage=3,

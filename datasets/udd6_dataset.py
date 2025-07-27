@@ -174,7 +174,7 @@ class UDD6Dataset(Dataset):
             for img_dir in structure["images"]:
                 img_path = self.data_root / img_dir
                 if img_path.exists():
-                    imgs = list(img_path.glob("*.jpg")) + list(img_path.glob("*.png"))
+                    imgs = list(img_path.glob("*.jpg")) + list(img_path.glob("*.JPG")) + list(img_path.glob("*.png")) + list(img_path.glob("*.PNG"))
                     if imgs:
                         self.image_files = sorted(imgs)
                         print(f"   Found images in: {img_path}")
@@ -184,7 +184,7 @@ class UDD6Dataset(Dataset):
                 for lbl_dir in structure["labels"]:
                     lbl_path = self.data_root / lbl_dir
                     if lbl_path.exists():
-                        lbls = list(lbl_path.glob("*.png")) + list(lbl_path.glob("*.jpg"))
+                        lbls = list(lbl_path.glob("*.png")) + list(lbl_path.glob("*.PNG")) + list(lbl_path.glob("*.jpg")) + list(lbl_path.glob("*.JPG"))
                         if lbls:
                             self.label_files = sorted(lbls)
                             print(f"   Found labels in: {lbl_path}")

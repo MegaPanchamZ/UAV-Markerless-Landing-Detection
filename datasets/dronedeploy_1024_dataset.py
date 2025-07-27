@@ -42,15 +42,16 @@ class DroneDeploy1024Dataset(Dataset):
     - Deterministic splits based on image hash
     """
     
-    # DroneDeploy RGB color to class mapping (as per dataset specification)
+    # DroneDeploy RGB color to class mapping (CORRECTED as per official specification)
+    # Colors from official repo: https://github.com/dronedeploy/dd-ml-segmentation-benchmark
     RGB_TO_CLASS = {
-        (75, 25, 230): 0,  # BUILDING
-        (180, 30, 145): 1,  # CLUTTER  
-        (255, 0, 255): -1, # IGNORE (skip chips with this)
-        (30, 255, 142): 2,  # VEGETATION
-        (0, 130, 200): 3,  # WATER
-        (0, 0, 0): 4,  # GROUND
-        (255, 255, 0): 5,  # CAR
+        (230, 25, 75): 0,   # BUILDING (red-ish)
+        (145, 30, 180): 1,  # CLUTTER (purple-ish)
+        (60, 180, 75): 2,   # VEGETATION (green)
+        (245, 130, 48): 3,  # WATER (blue-ish)
+        (255, 255, 255): 4, # GROUND (white)
+        (0, 130, 200): 5,   # CAR (dark blue)
+        (255, 0, 255): -1,  # IGNORE (magenta) - skip chips with this
     }
     
     # Map DroneDeploy classes to unified landing classes
@@ -451,18 +452,17 @@ class DroneDeploy1024Dataset(Dataset):
                 img_chip = image[y:y+self.chip_size, x:x+self.chip_size]
                 label_chip_rgb = label_rgb[y:y+self.chip_size, x:x+self.chip_size]
                 
-                # Skip chips with IGNORE pixels (255, 0, 255)
-                if self._has_ignore_pixels(label_chip_rgb):
-                    continue
-                
-                # Convert RGB labels to DroneDeploy class IDs
+                # Convert RGB labels to DroneDeploy class IDs (IGNORE pixels become -1)
                 dd_class_chip = self._rgb_to_class_vectorized(label_chip_rgb)
                 
-                # Convert DroneDeploy classes to landing classes
+                # Convert DroneDeploy classes to landing classes (preserve IGNORE as 255)
                 landing_chip = self._map_to_landing_classes(dd_class_chip)
                 
-                # Validate chip quality
-                if self._is_valid_chip(landing_chip, dd_class_chip):
+                # FIXED: Keep chips with IGNORE pixels but set them to 255 (ignore_index)
+                landing_chip[dd_class_chip == -1] = 255  # PyTorch ignore_index convention
+                
+                # Validate chip quality (but don't exclude IGNORE pixels)
+                if self._is_valid_chip_with_ignore(landing_chip, dd_class_chip):
                     # Extract elevation chip if available
                     elev_chip = None
                     if elevation is not None:
@@ -532,6 +532,30 @@ class DroneDeploy1024Dataset(Dataset):
             np.any(landing_label == 2),  # Building (obstacle)
             np.any(landing_label == 0)   # Ground (safe landing)
         ])
+        
+        return True
+    
+    def _is_valid_chip_with_ignore(self, landing_label: np.ndarray, dd_label: np.ndarray) -> bool:
+        """Check if chip has sufficient valid content for training (handles IGNORE pixels)."""
+        
+        # Count valid (non-IGNORE, non-clutter) pixels
+        valid_mask = (landing_label != 255) & (landing_label != 5)  # Not IGNORE or clutter
+        valid_pixels = np.sum(valid_mask)
+        total_non_ignore = np.sum(landing_label != 255)  # Total non-IGNORE pixels
+        
+        # Skip chips that are mostly IGNORE pixels
+        if total_non_ignore == 0:
+            return False
+            
+        # Require sufficient valid content among non-IGNORE pixels
+        valid_ratio = valid_pixels / max(total_non_ignore, 1)
+        if valid_ratio < 0.3:  # Lower threshold since we keep IGNORE chips
+            return False
+        
+        # Prefer chips with interesting content (multiple classes, excluding IGNORE)
+        unique_classes = len(np.unique(landing_label[landing_label != 255]))
+        if unique_classes < 2:
+            return False
         
         return True
     
