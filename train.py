@@ -59,6 +59,7 @@ warnings.filterwarnings('ignore')
 from models.edge_landing_net import EdgeLandingNet, create_edge_model
 from datasets.semantic_drone_dataset import SemanticDroneDataset, create_semantic_drone_transforms
 from datasets.dronedeploy_1024_dataset import DroneDeploy1024Dataset, create_dronedeploy_datasets
+from datasets.dronedeploy_hdf5_dataset import DroneDeployHDF5Dataset, create_hdf5_datasets
 from datasets.udd6_dataset import UDD6Dataset, create_udd6_transforms
 from losses.safety_aware_losses import CombinedSafetyLoss
 
@@ -1103,6 +1104,12 @@ def main():
     parser.add_argument('--force-preload', action='store_true',
                         help='Force preloading all data into memory (uses more RAM but much faster)')
     
+    # HDF5 DATASET OPTION: Ultimate performance solution
+    parser.add_argument('--use-hdf5', type=str, default=None, metavar='HDF5_FILE',
+                        help='Use HDF5 dataset file for Stage 2 (optimal performance)')
+    parser.add_argument('--hdf5-cache-memory', action='store_true',
+                        help='Cache HDF5 dataset in memory for maximum speed')
+    
     args = parser.parse_args()
     
     print("🚁 UAV Landing System - Universal Training")
@@ -1166,12 +1173,15 @@ def main():
             )
             stage_name = "Stage 1: Semantic Foundation"
         elif args.stage == 2:
-            datasets = create_dronedeploy_datasets(
+            dataset = DroneDeploy1024Dataset(
                 data_root=args.dronedeploy_data_root,
-                patch_size=512,
-                augmentation=True
+                split="train",
+                transform=create_dronedeploy_datasets(
+                    data_root=args.dronedeploy_data_root,
+                    patch_size=512,
+                    augmentation=True
+                )['train'].transform
             )
-            dataset = datasets['train']
             stage_name = "Stage 2: Landing Specialization"
         else:  # stage 3
             dataset = UDD6Dataset(
@@ -1301,12 +1311,29 @@ def main():
                 config['num_workers'] = max(1, config['num_workers'] // 2)
                 print(f"   🔧 PERFORMANCE: Reducing workers from {original_workers} to {config['num_workers']} for DroneDeploy dataset")
             
-            datasets = create_dronedeploy_datasets(
-                data_root=args.dronedeploy_data_root,
-                patch_size=256,  # Match EdgeLandingNet input size
-                augmentation=True,
-                force_preload=args.force_preload  # PERFORMANCE FIX
-            )
+            # HDF5 DATASET: Ultimate performance option
+            if args.use_hdf5:
+                print(f"   🗂️  USING HDF5 DATASET: {args.use_hdf5}")
+                print(f"   🚀 This is the optimal performance solution!")
+                
+                # Restore full workers for HDF5 (it handles multiprocessing well)
+                config['num_workers'] = original_workers
+                print(f"   🔧 PERFORMANCE: Using {config['num_workers']} workers for HDF5 dataset")
+                
+                datasets = create_hdf5_datasets(
+                    hdf5_path=args.use_hdf5,
+                    patch_size=256,  # Match EdgeLandingNet input size
+                    augmentation=True,
+                    cache_in_memory=args.hdf5_cache_memory
+                )
+            else:
+                # Original DroneDeploy dataset (with performance fixes)
+                datasets = create_dronedeploy_datasets(
+                    data_root=args.dronedeploy_data_root,
+                    patch_size=256,  # Match EdgeLandingNet input size
+                    augmentation=True,
+                    force_preload=args.force_preload  # PERFORMANCE FIX
+                )
             
             # FIXED: Better learning rate for stage 2
             stage2_lr = 1e-4 if args.epochs <= 30 else 5e-4
