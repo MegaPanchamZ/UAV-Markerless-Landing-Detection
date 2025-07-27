@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Urban Drone Dataset (UDD6) Loader for UAV Landing
-=================================================
+Urban Drone Dataset (UDD6) Loader with Proper RGB Color Mapping
+===============================================================
 
 UDD6 dataset for Stage 3 domain adaptation in progressive training:
 - 200+ training images at 3840×2160+ resolution  
-- 6 classes: Other, Facade, Road, Vegetation, Vehicle, Roof
+- 6 classes using proper RGB color mapping as per UDD6 specification
 - High-altitude perspective (60-100m)
 - Dense urban environments
 - Domain adaptation for altitude/urban robustness
@@ -25,6 +25,7 @@ import warnings
 class UDD6Dataset(Dataset):
     """
     Urban Drone Dataset (UDD6) for Stage 3 domain adaptation.
+    Uses proper RGB color mapping as per UDD6 specification.
     Maps UDD6's 6 classes to unified landing classes for progressive training.
     """
     
@@ -58,6 +59,16 @@ class UDD6Dataset(Dataset):
         self.use_random_crops = use_random_crops
         self.crops_per_image = crops_per_image if split == "train" else 1
         
+        # UDD6 RGB color to class mapping (as per UDD6 specification)
+        self.RGB_TO_CLASS = {
+            (102, 102, 156): 1,  # facade
+            (128, 64, 128): 2,   # road
+            (107, 142, 35): 3,   # vegetation
+            (0, 0, 142): 4,      # vehicle
+            (70, 70, 70): 5,     # roof
+            (0, 0, 0): 0,        # other/background
+        }
+        
         # UDD6 class definitions
         self.udd6_classes = {
             0: {"name": "other", "rgb": (0, 0, 0)},
@@ -87,10 +98,8 @@ class UDD6Dataset(Dataset):
             5: "other"         # Clutter, unknown areas
         }
         
-        # Create RGB to class mapping
-        self.rgb_to_class = {}
-        for class_id, info in self.udd6_classes.items():
-            self.rgb_to_class[info["rgb"]] = class_id
+        # Create fast RGB to class lookup table (3D array for vectorized lookup)
+        self._create_rgb_lookup_table()
         
         # OPTIMIZATION: Create fast lookup table for class mapping
         self.mapping_lut = np.zeros(256, dtype=np.uint8)
@@ -111,6 +120,32 @@ class UDD6Dataset(Dataset):
         print(f"   Classes: 6 → 6 landing classes")
         print(f"   Resolution: {target_resolution}")
         print(f"   Domain: High-altitude urban")
+    
+    def _create_rgb_lookup_table(self):
+        """Create fast RGB to class ID lookup table."""
+        # Create a 3D lookup table for RGB values
+        # This is memory intensive but very fast for conversion
+        self.rgb_lookup = np.full((256, 256, 256), 0, dtype=np.uint8)  # Default to other/background
+        
+        for rgb_color, class_id in self.RGB_TO_CLASS.items():
+            r, g, b = rgb_color
+            self.rgb_lookup[r, g, b] = class_id
+        
+        print(f"   Created RGB lookup table for {len(self.RGB_TO_CLASS)} color mappings")
+    
+    def _rgb_to_class_vectorized(self, rgb_image: np.ndarray) -> np.ndarray:
+        """Convert RGB image to class IDs using vectorized lookup."""
+        h, w = rgb_image.shape[:2]
+        
+        # Clip RGB values to valid range
+        rgb_clipped = np.clip(rgb_image, 0, 255)
+        
+        # Use advanced indexing for vectorized lookup
+        class_image = self.rgb_lookup[rgb_clipped[:, :, 0], 
+                                     rgb_clipped[:, :, 1], 
+                                     rgb_clipped[:, :, 2]]
+        
+        return class_image
     
     def _find_dataset_files(self):
         """Find UDD6 dataset files in various possible structures."""
@@ -258,8 +293,10 @@ class UDD6Dataset(Dataset):
             image = cv2.resize(image, self.target_resolution, interpolation=cv2.INTER_LINEAR)
             label_rgb = cv2.resize(label_rgb, self.target_resolution, interpolation=cv2.INTER_NEAREST)
         
-        # Convert RGB labels to class IDs and then to landing classes
-        udd6_label = self._rgb_to_class_ids(label_rgb)
+        # Convert RGB labels to UDD6 class IDs using vectorized lookup
+        udd6_label = self._rgb_to_class_vectorized(label_rgb)
+        
+        # Convert UDD6 classes to landing classes
         landing_label = self._map_to_landing_classes(udd6_label)
         
         # Apply transforms
@@ -311,20 +348,6 @@ class UDD6Dataset(Dataset):
         
         return image_crop, label_crop
     
-    def _rgb_to_class_ids(self, label_rgb: np.ndarray) -> np.ndarray:
-        """Convert RGB labels to UDD6 class IDs."""
-        h, w = label_rgb.shape[:2]
-        label = np.zeros((h, w), dtype=np.uint8)
-        
-        # Map RGB colors to class IDs with tolerance
-        for rgb_color, class_id in self.rgb_to_class.items():
-            # Use tolerance for slight color variations
-            diff = np.abs(label_rgb.astype(np.float32) - np.array(rgb_color).astype(np.float32))
-            mask = np.all(diff <= 10, axis=2)  # 10 RGB value tolerance
-            label[mask] = class_id
-        
-        return label
-    
     def _map_to_landing_classes(self, udd6_label: np.ndarray) -> np.ndarray:
         """Map UDD6 classes to unified landing classes using fast vectorized lookup."""
         # OPTIMIZATION: Use vectorized lookup table - orders of magnitude faster
@@ -344,7 +367,11 @@ class UDD6Dataset(Dataset):
             # Load and process label
             label_rgb = cv2.imread(str(label_path))
             label_rgb = cv2.cvtColor(label_rgb, cv2.COLOR_BGR2RGB)
-            udd6_label = self._rgb_to_class_ids(label_rgb)
+            
+            # Convert RGB to UDD6 classes using vectorized lookup
+            udd6_label = self._rgb_to_class_vectorized(label_rgb)
+            
+            # Convert to landing classes
             landing_label = self._map_to_landing_classes(udd6_label)
             
             unique, counts = np.unique(landing_label, return_counts=True)

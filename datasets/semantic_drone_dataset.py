@@ -18,7 +18,6 @@ from torch.utils.data import Dataset
 import cv2
 import numpy as np
 from pathlib import Path
-import pandas as pd
 from typing import Tuple, Dict, Optional, List
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -215,6 +214,65 @@ class SemanticDroneDataset(Dataset):
                 3: "water",        # Water bodies, pools (critical hazard)
                 4: "car",          # Cars, vehicles (dynamic obstacles)
                 5: "clutter"       # Unknown, mixed debris, people, animals
+            }
+        elif self.class_mapping_type == "native_24_class":
+            # STAGE 1: Native 24-class training for rich representation learning
+            # Uses the original 24 classes from Semantic Drone Dataset
+            # This allows the model to learn fine-grained semantic understanding
+            self.class_mapping = {
+                # Identity mapping - keep all 24 original classes
+                0: 0,   # unlabeled
+                1: 1,   # paved-area
+                2: 2,   # dirt
+                3: 3,   # grass
+                4: 4,   # gravel
+                5: 5,   # water
+                6: 6,   # rocks
+                7: 7,   # pool
+                8: 8,   # vegetation
+                9: 9,   # roof
+                10: 10, # wall
+                11: 11, # window
+                12: 12, # door
+                13: 13, # fence
+                14: 14, # fence-pole
+                15: 15, # person
+                16: 16, # dog
+                17: 17, # car
+                18: 18, # bicycle
+                19: 19, # tree
+                20: 20, # bald-tree
+                21: 21, # ar-marker
+                22: 22, # obstacle
+                23: 23  # conflicting
+            }
+            
+            # Native 24 classes with proper semantic labels
+            self.landing_classes = {
+                0: "unlabeled",
+                1: "paved-area",
+                2: "dirt", 
+                3: "grass",
+                4: "gravel",
+                5: "water",
+                6: "rocks",
+                7: "pool",
+                8: "vegetation",
+                9: "roof",
+                10: "wall",
+                11: "window",
+                12: "door",
+                13: "fence",
+                14: "fence-pole",
+                15: "person",
+                16: "dog",
+                17: "car",
+                18: "bicycle",
+                19: "tree",
+                20: "bald-tree",
+                21: "ar-marker",
+                22: "obstacle",
+                23: "conflicting"
             }
         else:
             raise ValueError(f"Unknown class mapping: {self.class_mapping_type}")

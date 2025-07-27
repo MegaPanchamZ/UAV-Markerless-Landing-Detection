@@ -61,17 +61,41 @@ from datasets.semantic_drone_dataset import SemanticDroneDataset, create_semanti
 from datasets.dronedeploy_1024_dataset import DroneDeploy1024Dataset, create_dronedeploy_datasets
 from datasets.dronedeploy_hdf5_dataset import DroneDeployHDF5Dataset, create_hdf5_datasets
 from datasets.udd6_dataset import UDD6Dataset, create_udd6_transforms
-from losses.safety_aware_losses import CombinedSafetyLoss
+from datasets.progressive_mapping import ProgressiveClassMapper, adapt_model_for_new_stage
 
-# Class names for better logging
-CLASS_NAMES = {
-    0: "ground",
-    1: "vegetation", 
-    2: "building",
-    3: "water",
-    4: "car",
-    5: "clutter"
-}
+# Class names for better logging - DYNAMIC based on stage
+def get_class_names_for_stage(stage: int) -> Dict[int, str]:
+    """Get class names for the specified training stage."""
+    if stage == 1:
+        # Stage 1: Native 24 classes from Semantic Drone Dataset
+        return {
+            0: "unlabeled", 1: "paved-area", 2: "dirt", 3: "grass", 4: "gravel",
+            5: "water", 6: "rocks", 7: "pool", 8: "vegetation", 9: "roof",
+            10: "wall", 11: "window", 12: "door", 13: "fence", 14: "fence-pole",
+            15: "person", 16: "dog", 17: "car", 18: "bicycle", 19: "tree",
+            20: "bald-tree", 21: "ar-marker", 22: "obstacle", 23: "conflicting"
+        }
+    elif stage in [2, 3]:
+        # Stage 2 & 3: Unified 6 classes for landing detection
+        return {
+            0: "ground",
+            1: "vegetation", 
+            2: "building",
+            3: "water",
+            4: "car",
+            5: "clutter"
+        }
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
+
+def get_num_classes_for_stage(stage: int) -> int:
+    """Get number of classes for the specified training stage."""
+    if stage == 1:
+        return 24  # Native Semantic Drone Dataset classes
+    elif stage in [2, 3]:
+        return 6   # Unified landing detection classes
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
 
 
 class HardwareDetector:
@@ -354,7 +378,8 @@ class UniversalTrainer:
         model: nn.Module,
         hardware_config: Dict,
         checkpoint_dir: str = 'outputs',
-        use_wandb: bool = False
+        use_wandb: bool = False,
+        stage: int = 1  # NEW: Track current training stage
     ):
         self.device = torch.device(hardware_config['device'])
         self.model = model.to(self.device)
@@ -362,6 +387,7 @@ class UniversalTrainer:
         self.use_wandb = use_wandb and WANDB_AVAILABLE
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.stage = stage  # NEW: Current training stage
         
         # Training state
         self.global_step = 0
@@ -370,8 +396,12 @@ class UniversalTrainer:
         # Mixed precision scaler
         self.scaler = GradScaler() if hardware_config['mixed_precision'] else None
         
+        # NEW: Initialize progressive mapper
+        self.progressive_mapper = ProgressiveClassMapper()
+        
         print(f"🚁 Universal Trainer initialized:")
         print(f"   Device: {self.device}")
+        print(f"   Stage: {self.stage} ({get_num_classes_for_stage(self.stage)} classes)")
         print(f"   Batch size: {self.config['batch_size']}")
         print(f"   Workers: {self.config['num_workers']}")
         ## OPTIMIZATION ##: Display new config options
@@ -606,9 +636,9 @@ class UniversalTrainer:
                 # Dataset info
                 'train_samples': len(train_dataset),
                 'val_samples': len(val_dataset),
-                'input_resolution': '512x512',
-                'num_classes': 6,
-                'class_names': list(CLASS_NAMES.values())
+                'input_resolution': '256x256' if self.stage == 1 else '512x512',
+                'num_classes': get_num_classes_for_stage(self.stage),
+                'class_names': list(get_class_names_for_stage(self.stage).values())
             }
             
             # Add class weights if available
@@ -685,13 +715,14 @@ class UniversalTrainer:
                     log_dict[f'val_{component}_loss'] = value
                 
                 # Per-class IoU with class names
+                class_names = get_class_names_for_stage(self.stage)
                 for class_id, iou in enumerate(val_metrics['iou_per_class']):
-                    class_name = CLASS_NAMES.get(class_id, f'class_{class_id}')
+                    class_name = class_names.get(class_id, f'class_{class_id}')
                     log_dict[f'iou_{class_name}'] = iou
                 
                 # Class distribution in validation set
                 for class_id, ratio in enumerate(val_metrics['class_distribution']):
-                    class_name = CLASS_NAMES.get(class_id, f'class_{class_id}')
+                    class_name = class_names.get(class_id, f'class_{class_id}')
                     log_dict[f'val_class_ratio_{class_name}'] = ratio
                 
                 # Training stability indicators
@@ -717,9 +748,10 @@ class UniversalTrainer:
                     print(f"     {component}: {value:.4f}")
             
             # Per-class IoU breakdown
+            class_names = get_class_names_for_stage(self.stage)
             print(f"   Per-class IoU:")
             for class_id, iou in enumerate(val_metrics['iou_per_class']):
-                class_name = CLASS_NAMES.get(class_id, f'class_{class_id}')
+                class_name = class_names.get(class_id, f'class_{class_id}')
                 pixels = val_metrics['per_class_pixels'][class_id]
                 ratio = val_metrics['class_distribution'][class_id]
                 print(f"     {class_name}: {iou:.4f} ({pixels:.0f} pixels, {ratio:.2%})")
@@ -740,10 +772,12 @@ class UniversalTrainer:
             # Check for class imbalance issues
             class_ratios = val_metrics['class_distribution']
             if np.max(class_ratios) > 0.8:
-                dominant_class = CLASS_NAMES[np.argmax(class_ratios)]
+                class_names = get_class_names_for_stage(self.stage)
+                dominant_class = class_names[np.argmax(class_ratios)]
                 print(f"⚠️  WARNING: Severe class imbalance - {dominant_class} dominates ({np.max(class_ratios):.1%})")
             elif np.min(class_ratios[class_ratios > 0]) < 0.01:
-                rare_classes = [CLASS_NAMES[i] for i, ratio in enumerate(class_ratios) if 0 < ratio < 0.01]
+                class_names = get_class_names_for_stage(self.stage)
+                rare_classes = [class_names[i] for i, ratio in enumerate(class_ratios) if 0 < ratio < 0.01]
                 print(f"⚠️  WARNING: Very rare classes detected: {', '.join(rare_classes)}")
         
         stage_metrics = {
@@ -763,8 +797,11 @@ class UniversalTrainer:
         """Analyze class distribution in train and validation sets."""
         print(f"   Analyzing class distribution (sampling {max_samples} images)...")
         
+        num_classes = get_num_classes_for_stage(self.stage)
+        class_names = get_class_names_for_stage(self.stage)
+        
         for split_name, dataset in [("Train", train_dataset), ("Val", val_dataset)]:
-            class_counts = np.zeros(6)
+            class_counts = np.zeros(num_classes)
             samples_analyzed = 0
             
             # Sample more images and sample them evenly distributed
@@ -786,7 +823,7 @@ class UniversalTrainer:
                         mask = sample['mask']
                     
                     # FIXED: Count pixels per class correctly
-                    for class_id in range(6):
+                    for class_id in range(num_classes):
                         count = np.sum(mask == class_id)
                         class_counts[class_id] += count
                     
@@ -803,20 +840,20 @@ class UniversalTrainer:
                 class_ratios = class_counts / total_pixels
                 print(f"   {split_name} set class distribution ({samples_analyzed} samples analyzed):")
                 for class_id, ratio in enumerate(class_ratios):
-                    class_name = CLASS_NAMES.get(class_id, f'class_{class_id}')
+                    class_name = class_names.get(class_id, f'class_{class_id}')
                     print(f"     {class_name}: {ratio:.2%} ({class_counts[class_id]:.0f} pixels)")
                 
                 # Check for severe imbalance
                 if np.max(class_ratios) > 0.8:
-                    dominant_class = CLASS_NAMES[np.argmax(class_ratios)]
+                    dominant_class = class_names[np.argmax(class_ratios)]
                     print(f"     ⚠️  Severe imbalance: {dominant_class} dominates")
                     
                 if np.min(class_ratios[class_ratios > 0]) < 0.005:
-                    rare_classes = [CLASS_NAMES[i] for i, ratio in enumerate(class_ratios) if 0 < ratio < 0.005]
+                    rare_classes = [class_names[i] for i, ratio in enumerate(class_ratios) if 0 < ratio < 0.005]
                     print(f"     ⚠️  Very rare classes: {', '.join(rare_classes)}")
                 
                 # ADDED: Check for completely missing classes
-                missing_classes = [CLASS_NAMES[i] for i, count in enumerate(class_counts) if count == 0]
+                missing_classes = [class_names[i] for i, count in enumerate(class_counts) if count == 0]
                 if missing_classes:
                     print(f"     ❌ Missing classes: {', '.join(missing_classes)}")
                     
@@ -927,9 +964,10 @@ class UniversalTrainer:
         total_loss = 0.0
         loss_components = defaultdict(float)
         
-        intersection = torch.zeros(6, device=self.device)
-        union = torch.zeros(6, device=self.device)
-        class_pixel_counts = torch.zeros(6, device=self.device)
+        num_classes = get_num_classes_for_stage(self.stage)  # Dynamic based on stage
+        intersection = torch.zeros(num_classes, device=self.device)
+        union = torch.zeros(num_classes, device=self.device)
+        class_pixel_counts = torch.zeros(num_classes, device=self.device)
         total_correct = 0
         total_pixels = 0
         
@@ -972,7 +1010,7 @@ class UniversalTrainer:
                 confidence_scores.extend(entropy.flatten().cpu().numpy())
                 
                 # Per-class IoU and pixel counts
-                for class_id in range(6):
+                for class_id in range(num_classes):
                     pred_mask = (pred_classes == class_id)
                     target_mask = (targets == class_id)
                     
@@ -1144,16 +1182,19 @@ def main():
     
     print(f"\n⚙️  Optimized Training Configuration:")
     print(f"   Device: {config['device']}")
+    print(f"   Stage: {args.stage}")
+    print(f"   Classes: {get_num_classes_for_stage(args.stage)}")
     print(f"   Batch size: {config['batch_size']}")
     print(f"   Workers: {config['num_workers']}")
     print(f"   Persistent Workers: {config.get('persistent_workers', False)}")
     print(f"   Prefetch Factor: {config.get('prefetch_factor', 2)}")
     print(f"   Mixed precision: {config['mixed_precision']}")
     
-    # Create EdgeLandingNet model
+    # Create model with appropriate number of classes for the stage
+    num_classes = get_num_classes_for_stage(args.stage)
     model = create_edge_model(
         model_type="standard",  # Use proven EdgeLandingNet
-        num_classes=6,
+        num_classes=num_classes,  # Dynamic based on stage
         input_size=256  # Optimal size for edge inference
     )
     
@@ -1213,10 +1254,11 @@ def main():
         model=model,
         hardware_config=config,
         checkpoint_dir=args.checkpoint_dir,
-        use_wandb=args.use_wandb
+        use_wandb=args.use_wandb,
+        stage=args.stage  # NEW: Pass current stage
     )
     
-    # PROGRESSIVE TRAINING FIX: Load previous stage checkpoint
+    # PROGRESSIVE TRAINING FIX: Load previous stage checkpoint with adaptation
     if args.stage > 1 and not args.resume:
         previous_stage = args.stage - 1
         previous_checkpoint = Path(args.checkpoint_dir) / f"stage{previous_stage}_best.pth"
@@ -1227,17 +1269,50 @@ def main():
             
             try:
                 checkpoint = torch.load(previous_checkpoint, map_location='cpu')
-                trainer.model.load_state_dict(checkpoint['model_state_dict'])
+                
+                # Check if we need to adapt model architecture (class count change)
+                prev_num_classes = get_num_classes_for_stage(previous_stage)
+                curr_num_classes = get_num_classes_for_stage(args.stage)
+                
+                if prev_num_classes != curr_num_classes:
+                    print(f"   🔧 ADAPTING MODEL: {prev_num_classes} → {curr_num_classes} classes")
+                    
+                    # Load the previous model first
+                    prev_model = create_edge_model(
+                        model_type="standard",
+                        num_classes=prev_num_classes,
+                        input_size=256
+                    )
+                    prev_model.load_state_dict(checkpoint['model_state_dict'])
+                    
+                    # Adapt to new stage
+                    adapted_model = adapt_model_for_new_stage(
+                        prev_model, 
+                        previous_stage, 
+                        args.stage, 
+                        trainer.progressive_mapper,
+                        strategy="linear_projection"
+                    )
+                    
+                    # Transfer adapted weights to our model
+                    trainer.model.load_state_dict(adapted_model.state_dict())
+                    
+                    print(f"   ✅ Model adapted from Stage {previous_stage} to Stage {args.stage}")
+                else:
+                    # Direct loading (same number of classes)
+                    trainer.model.load_state_dict(checkpoint['model_state_dict'])
+                    print(f"   ✅ Loaded Stage {previous_stage} weights directly")
                 
                 # Update trainer state
                 if 'best_metrics' in checkpoint:
                     trainer.best_metrics.update(checkpoint['best_metrics'])
                 
-                print(f"   ✅ Loaded Stage {previous_stage} weights (mIoU: {checkpoint.get('metrics', {}).get('miou', 'unknown'):.4f})")
-                print(f"   📈 Stage {args.stage} will build upon this foundation")
+                previous_miou = checkpoint.get('metrics', {}).get('miou', 'unknown')
+                print(f"   📈 Previous mIoU: {previous_miou:.4f}" if isinstance(previous_miou, (int, float)) else f"   📈 Previous mIoU: {previous_miou}")
+                print(f"   🎯 Stage {args.stage} will build upon this foundation")
                 
             except Exception as e:
-                print(f"   ⚠️  Failed to load checkpoint: {e}")
+                print(f"   ⚠️  Failed to load/adapt checkpoint: {e}")
                 print(f"   🚀 Starting Stage {args.stage} from scratch")
         else:
             print(f"\n⚠️  No Stage {previous_stage} checkpoint found at: {previous_checkpoint}")
@@ -1257,41 +1332,46 @@ def main():
     try:
         # Run the specified stage
         if args.stage == 1:
-            print(f"\n🚀 Running Stage 1: Semantic Foundation Training")
+            print(f"\n🚀 Running Stage 1: Native 24-Class Foundation Training")
+            print(f"   📊 Learning rich semantic representations from all 24 classes")
+            print(f"   🎯 Goal: Build strong feature extraction foundation")
             
-            # FIXED: Use 256x256 input size to match EdgeLandingNet design
+            # STAGE 1: Use native 24-class training for rich representation learning
             transforms = create_semantic_drone_transforms(
                 input_size=(256, 256),  # Match EdgeLandingNet
                 is_training=True,
-                augmentation_profile="extreme"  # Use extreme augmentation like successful approach
+                augmentation_profile="extreme"  # Use extreme augmentation for robustness
             )
             
             train_dataset = SemanticDroneDataset(
                 data_root=args.sdd_data_root,
                 split="train",
                 transform=transforms,
-                class_mapping="unified_6_class",
-                target_resolution=(256, 256),  # Ensure consistent resolution
-                use_random_crops=True,  # Enable extreme augmentation
-                crops_per_image=12  # Increased for better coverage (0.38→0.65 mIoU)
+                class_mapping="native_24_class",  # NEW: Use native 24 classes!
+                target_resolution=(256, 256),
+                use_random_crops=True,
+                crops_per_image=12  # More crops for better coverage
             )
             
             val_dataset = SemanticDroneDataset(
                 data_root=args.sdd_data_root,
                 split="val",
                 transform=create_semantic_drone_transforms(
-                    input_size=(256, 256),  # Match EdgeLandingNet
+                    input_size=(256, 256),
                     is_training=False,
                     augmentation_profile="light"
                 ),
-                class_mapping="unified_6_class",
+                class_mapping="native_24_class",  # NEW: Use native 24 classes!
                 target_resolution=(256, 256),
                 use_random_crops=False,
                 crops_per_image=1
             )
             
-            # FIXED: Better learning rate for stage 1 (increased for EdgeLandingNet)
-            stage1_lr = 5e-4 if args.epochs <= 30 else 1e-3  # Reduced LR for stability with extreme imbalance
+            print(f"   📈 Training with {len(train_dataset)} samples, {len(val_dataset)} validation")
+            print(f"   🏷️  Using all 24 native semantic classes for rich learning")
+            
+            # Stage 1: Foundation learning rate - slower for stable 24-class learning
+            stage1_lr = 3e-4 if args.epochs <= 30 else 5e-4
             
             results = trainer.train_stage(
                 stage=1,
@@ -1299,11 +1379,13 @@ def main():
                 val_dataset=val_dataset,
                 num_epochs=args.epochs,
                 learning_rate=stage1_lr,
-                stage_name="Semantic Foundation"
+                stage_name="Native 24-Class Foundation"
             )
             
         elif args.stage == 2:
-            print(f"\n🚀 Running Stage 2: Landing Specialization")
+            print(f"\n🚀 Running Stage 2: Landing Specialization (6-Class Adaptation)")
+            print(f"   🔄 Adapting from 24-class foundation to 6-class landing detection")
+            print(f"   🎯 Goal: Specialize for landing detection while preserving learned features")
             
             # PERFORMANCE FIX: Reduce workers for DroneDeploy dataset to avoid I/O contention
             original_workers = config['num_workers']
@@ -1335,8 +1417,11 @@ def main():
                     force_preload=args.force_preload  # PERFORMANCE FIX
                 )
             
-            # FIXED: Better learning rate for stage 2
-            stage2_lr = 1e-4 if args.epochs <= 30 else 5e-4
+            print(f"   📈 Training with {len(datasets['train'])} samples, {len(datasets['val'])} validation")
+            print(f"   🏷️  Using 6-class unified landing detection scheme")
+            
+            # Stage 2: Adaptation learning rate - higher for new task learning
+            stage2_lr = 2e-4 if args.epochs <= 30 else 1e-3
             
             # Update trainer config for this stage
             trainer.config['num_workers'] = config['num_workers']
@@ -1347,11 +1432,13 @@ def main():
                 val_dataset=datasets['val'],
                 num_epochs=args.epochs,
                 learning_rate=stage2_lr,
-                stage_name="Landing Specialization"
+                stage_name="6-Class Landing Specialization"
             )
             
         elif args.stage == 3:
-            print(f"\n🚀 Running Stage 3: Domain Adaptation")
+            print(f"\n🚀 Running Stage 3: Urban Domain Adaptation")
+            print(f"   🏙️  Adapting to urban environments with UDD6 dataset")
+            print(f"   🎯 Goal: Fine-tune for specific deployment scenarios")
             
             transforms = create_udd6_transforms(
                 is_training=True,
@@ -1364,7 +1451,7 @@ def main():
                 transform=transforms,
                 target_resolution=(256, 256),  # Match EdgeLandingNet
                 use_random_crops=True,
-                crops_per_image=12  # Increased for better coverage (0.38→0.65 mIoU)
+                crops_per_image=12  # Increased for better coverage
             )
             
             val_dataset = UDD6Dataset(
@@ -1376,8 +1463,11 @@ def main():
                 crops_per_image=1
             )
             
-            # FIXED: Better learning rate for stage 3 (fine-tuning)
-            stage3_lr = 2e-5 if args.epochs <= 30 else 5e-5
+            print(f"   📈 Training with {len(train_dataset)} samples, {len(val_dataset)} validation")
+            print(f"   🏷️  Using 6-class urban domain scheme")
+            
+            # Stage 3: Fine-tuning learning rate - very low for careful adaptation
+            stage3_lr = 1e-5 if args.epochs <= 30 else 3e-5
             
             results = trainer.train_stage(
                 stage=3,
@@ -1385,7 +1475,7 @@ def main():
                 val_dataset=val_dataset,
                 num_epochs=args.epochs,
                 learning_rate=stage3_lr,
-                stage_name="Domain Adaptation"
+                stage_name="Urban Domain Adaptation"
             )
         
         print(f"\n🎉 Training completed successfully!")
@@ -1403,9 +1493,9 @@ def main():
         if args.stage == 1:
             print(f"\n🚀 Next Step: Run Stage 2 Landing Specialization")
             print(f"   python train.py --stage 2 --epochs 30")
-            print(f"   (Will automatically load Stage 1 weights)")
+            print(f"   (Will automatically adapt from 24-class to 6-class)")
         elif args.stage == 2:
-            print(f"\n🚀 Next Step: Run Stage 3 Domain Adaptation") 
+            print(f"\n🚀 Next Step: Run Stage 3 Urban Domain Adaptation") 
             print(f"   python train.py --stage 3 --epochs 20")
             print(f"   (Will automatically load Stage 2 weights)")
         elif args.stage == 3:
@@ -1416,19 +1506,25 @@ def main():
         # PROGRESSIVE TRAINING GUIDANCE
         if args.stage == 1:
             print(f"\n📋 Progressive Training Workflow:")
-            print(f"   1. ✅ Stage 1: Semantic Foundation (DONE)")
-            print(f"   2. ⏳ Stage 2: Landing Specialization")
-            print(f"   3. ⏳ Stage 3: Domain Adaptation")
+            print(f"   1. ✅ Stage 1: Native 24-Class Foundation (DONE)")
+            print(f"   2. ⏳ Stage 2: 6-Class Landing Specialization")
+            print(f"   3. ⏳ Stage 3: Urban Domain Adaptation")
         elif args.stage == 2:
             print(f"\n📋 Progressive Training Workflow:")
-            print(f"   1. ✅ Stage 1: Semantic Foundation")
-            print(f"   2. ✅ Stage 2: Landing Specialization (DONE)")
-            print(f"   3. ⏳ Stage 3: Domain Adaptation")
+            print(f"   1. ✅ Stage 1: Native 24-Class Foundation")
+            print(f"   2. ✅ Stage 2: 6-Class Landing Specialization (DONE)")
+            print(f"   3. ⏳ Stage 3: Urban Domain Adaptation")
         elif args.stage == 3:
             print(f"\n📋 Progressive Training Workflow:")
-            print(f"   1. ✅ Stage 1: Semantic Foundation")
-            print(f"   2. ✅ Stage 2: Landing Specialization")
-            print(f"   3. ✅ Stage 3: Domain Adaptation (DONE)")
+            print(f"   1. ✅ Stage 1: Native 24-Class Foundation")
+            print(f"   2. ✅ Stage 2: 6-Class Landing Specialization")
+            print(f"   3. ✅ Stage 3: Urban Domain Adaptation (DONE)")
+            
+        # Show expected performance improvements
+        print(f"\n📊 Expected Progressive Improvements:")
+        print(f"   Stage 1 (24-class): Rich semantic understanding")
+        print(f"   Stage 2 (6-class):  mIoU target 0.45-0.65")
+        print(f"   Stage 3 (6-class):  mIoU target 0.60-0.75")
         
     except KeyboardInterrupt:
         print(f"\n⚠️  Training interrupted by user")
