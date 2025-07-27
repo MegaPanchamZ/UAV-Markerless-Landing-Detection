@@ -1412,8 +1412,7 @@ def main():
                 # Original DroneDeploy dataset (with performance fixes)
                 datasets = create_dronedeploy_datasets(
                     data_root=args.dronedeploy_data_root,
-                    patch_size=256,  # Match EdgeLandingNet input size
-                    augmentation=True,
+                    target_size=256,  # Match EdgeLandingNet input size
                     force_preload=args.force_preload  # PERFORMANCE FIX
                 )
             
