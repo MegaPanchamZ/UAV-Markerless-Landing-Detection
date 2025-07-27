@@ -1206,6 +1206,44 @@ def main():
         use_wandb=args.use_wandb
     )
     
+    # PROGRESSIVE TRAINING FIX: Load previous stage checkpoint
+    if args.stage > 1 and not args.resume:
+        previous_stage = args.stage - 1
+        previous_checkpoint = Path(args.checkpoint_dir) / f"stage{previous_stage}_best.pth"
+        
+        if previous_checkpoint.exists():
+            print(f"\n🔄 PROGRESSIVE TRAINING: Loading Stage {previous_stage} checkpoint...")
+            print(f"   From: {previous_checkpoint}")
+            
+            try:
+                checkpoint = torch.load(previous_checkpoint, map_location='cpu')
+                trainer.model.load_state_dict(checkpoint['model_state_dict'])
+                
+                # Update trainer state
+                if 'best_metrics' in checkpoint:
+                    trainer.best_metrics.update(checkpoint['best_metrics'])
+                
+                print(f"   ✅ Loaded Stage {previous_stage} weights (mIoU: {checkpoint.get('metrics', {}).get('miou', 'unknown'):.4f})")
+                print(f"   📈 Stage {args.stage} will build upon this foundation")
+                
+            except Exception as e:
+                print(f"   ⚠️  Failed to load checkpoint: {e}")
+                print(f"   🚀 Starting Stage {args.stage} from scratch")
+        else:
+            print(f"\n⚠️  No Stage {previous_stage} checkpoint found at: {previous_checkpoint}")
+            print(f"   💡 Run Stage {previous_stage} first: python train.py --stage {previous_stage}")
+            print(f"   🚀 Starting Stage {args.stage} from scratch")
+    elif args.resume:
+        print(f"\n🔄 RESUMING: Loading checkpoint from {args.resume}")
+        try:
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            trainer.model.load_state_dict(checkpoint['model_state_dict'])
+            if 'best_metrics' in checkpoint:
+                trainer.best_metrics.update(checkpoint['best_metrics'])
+            print(f"   ✅ Resumed from checkpoint")
+        except Exception as e:
+            print(f"   ❌ Failed to resume: {e}")
+    
     try:
         # Run the specified stage
         if args.stage == 1:
@@ -1338,9 +1376,32 @@ def main():
         if args.stage == 1:
             print(f"\n🚀 Next Step: Run Stage 2 Landing Specialization")
             print(f"   python train.py --stage 2 --epochs 30")
+            print(f"   (Will automatically load Stage 1 weights)")
         elif args.stage == 2:
             print(f"\n🚀 Next Step: Run Stage 3 Domain Adaptation") 
             print(f"   python train.py --stage 3 --epochs 20")
+            print(f"   (Will automatically load Stage 2 weights)")
+        elif args.stage == 3:
+            print(f"\n🎯 Progressive Training Complete!")
+            print(f"   Final model: {args.checkpoint_dir}/stage3_best.pth")
+            print(f"   Ready for inference and deployment")
+            
+        # PROGRESSIVE TRAINING GUIDANCE
+        if args.stage == 1:
+            print(f"\n📋 Progressive Training Workflow:")
+            print(f"   1. ✅ Stage 1: Semantic Foundation (DONE)")
+            print(f"   2. ⏳ Stage 2: Landing Specialization")
+            print(f"   3. ⏳ Stage 3: Domain Adaptation")
+        elif args.stage == 2:
+            print(f"\n📋 Progressive Training Workflow:")
+            print(f"   1. ✅ Stage 1: Semantic Foundation")
+            print(f"   2. ✅ Stage 2: Landing Specialization (DONE)")
+            print(f"   3. ⏳ Stage 3: Domain Adaptation")
+        elif args.stage == 3:
+            print(f"\n📋 Progressive Training Workflow:")
+            print(f"   1. ✅ Stage 1: Semantic Foundation")
+            print(f"   2. ✅ Stage 2: Landing Specialization")
+            print(f"   3. ✅ Stage 3: Domain Adaptation (DONE)")
         
     except KeyboardInterrupt:
         print(f"\n⚠️  Training interrupted by user")
