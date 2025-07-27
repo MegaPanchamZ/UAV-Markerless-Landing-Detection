@@ -23,6 +23,7 @@ dependencies = [
     "scikit-learn>=1.7.1",
     "wandb>=0.21.0",
     "tifffile>=2025.6.11",
+    "opencv-python-headless>=4.11.0.86",
 ]
 
 [project.optional-dependencies]
