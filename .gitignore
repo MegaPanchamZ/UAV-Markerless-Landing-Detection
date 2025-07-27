@@ -11,3 +11,8 @@ wheels/
 wandb/
 cache/
 ubu_venv
+
+
+datasets/semantic_drone_dataset/
+datasets/udd6_dataset/
+datasets/drone_deploy_dataset_intermediate/

@@ -65,6 +65,16 @@ def check_requirements():
         print(f"Install with: pip install {' '.join(missing_packages)}")
         return False
     
+    # Check for kaggle CLI
+    try:
+        result = subprocess.run(['kaggle', '--version'], capture_output=True)
+        if result.returncode != 0:
+            print(f"⚠️  Kaggle CLI not found. Install with: pip install kaggle")
+            return False
+    except FileNotFoundError:
+        print(f"⚠️  Kaggle CLI not found. Install with: pip install kaggle")
+        return False
+    
     return True
 
 
@@ -87,22 +97,20 @@ class DatasetDownloader:
             },
             'dronedeploy': {
                 'name': 'DroneDeploy Dataset',
-                'source': 'google_drive',
-                'file_id': '1Y3nK2_HlJeprk6q0B4hSKt-XhTLWGV1c',  # Example ID
-                'filename': 'drone_deploy_dataset.zip',
-                'extract_dir': 'drone_deploy_dataset',
-                'size_gb': 8.0,
-                'description': 'Large-scale aerial imagery for landing detection'
+                'source': 'kaggle',
+                'kaggle_dataset': 'mightyrains/drone-deploy-medium-dataset',
+                'extract_dir': 'drone_deploy_dataset_intermediate',
+                'size_gb': 9.0,
+                'description': 'Large-scale aerial imagery for landing detection (Kaggle, 9GB zip)'
             },
             'udd6': {
                 'name': 'Urban Drone Dataset 6',
-                'source': 'github_release',
-                'repo': 'MarcWong/UDD',
-                'release_tag': 'v1.0',
-                'filename': 'udd6_dataset.tar.gz',
+                'source': 'google_drive',
+                'file_id': '1BNL8HNFRiNjSzdcQJo-uXiejZJ6DgunY',
+                'filename': 'UDD5_UDD6_dataset.zip',
                 'extract_dir': 'udd6_dataset',
                 'size_gb': 4.5,
-                'description': 'Urban drone dataset with 6 classes'
+                'description': 'Urban drone dataset with 6 classes (UDD-5 + UDD-6, Google Drive)'
             }
         }
         
@@ -124,19 +132,33 @@ class DatasetDownloader:
         return True
     
     def verify_kaggle_setup(self) -> bool:
-        """Verify Kaggle API is properly configured."""
+        """Verify Kaggle CLI is properly configured."""
         try:
-            import kaggle
-            # Test API access
-            kaggle.api.authenticate()
-            print("✅ Kaggle API authenticated successfully")
+            # Test kaggle CLI instead of Python API
+            result = subprocess.run(['kaggle', '--version'], capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"❌ Kaggle CLI not found")
+                print(f"   Install with: pip install kaggle")
+                return False
+            
+            # Test authentication
+            result = subprocess.run(['kaggle', 'datasets', 'list', '--max-size', '1'], 
+                                  capture_output=True, text=True)
+            
+            if result.returncode != 0:
+                print(f"❌ Kaggle CLI authentication failed")
+                print(f"   Please configure Kaggle API:")
+                print(f"   1. Get API token from https://www.kaggle.com/settings")
+                print(f"   2. Place kaggle.json in ~/.kaggle/")
+                print(f"   3. Run: chmod 600 ~/.kaggle/kaggle.json")
+                return False
+            
+            print("✅ Kaggle CLI authenticated successfully")
             return True
+            
         except Exception as e:
-            print(f"❌ Kaggle API setup failed: {e}")
-            print(f"   Please configure Kaggle API:")
-            print(f"   1. Get API token from https://www.kaggle.com/settings")
-            print(f"   2. Place kaggle.json in ~/.kaggle/")
-            print(f"   3. Run: chmod 600 ~/.kaggle/kaggle.json")
+            print(f"❌ Kaggle CLI setup failed: {e}")
             return False
     
     def download_file_with_progress(self, url: str, filepath: Path, chunk_size: int = 8192) -> bool:
@@ -181,27 +203,107 @@ class DatasetDownloader:
             return False
     
     def download_from_kaggle(self, dataset_name: str, output_dir: Path) -> bool:
-        """Download dataset from Kaggle."""
+        """Download dataset from Kaggle using CLI."""
         try:
-            import kaggle
-            
             print(f"📥 Downloading from Kaggle: {dataset_name}")
             
-            # Download to temporary directory first
-            with tempfile.TemporaryDirectory() as temp_dir:
-                kaggle.api.dataset_download_files(
-                    dataset_name,
-                    path=temp_dir,
-                    unzip=True
-                )
+            # Use Kaggle CLI directly - more reliable for large downloads
+            zip_filename = f"{dataset_name.split('/')[-1]}.zip"
+            zip_path = self.base_dir / zip_filename
+            
+            # Download using kaggle CLI
+            cmd = [
+                'kaggle', 'datasets', 'download', 
+                dataset_name, 
+                '-p', str(self.base_dir),
+                '--unzip'
+            ]
+            
+            print(f"🔄 Running: {' '.join(cmd)}")
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(self.base_dir))
+            
+            if result.returncode != 0:
+                print(f"❌ Kaggle CLI failed:")
+                print(f"   stdout: {result.stdout}")
+                print(f"   stderr: {result.stderr}")
+                return False
+            
+            print(f"✅ Kaggle CLI download completed")
+            
+            # Find the extracted directory and move to target location
+            # Kaggle CLI extracts to current directory
+            extracted_items = []
+            
+            # Look for recently created directories (after download)
+            current_time = time.time()
+            for item in self.base_dir.iterdir():
+                # Skip if it's the target directory or existing known datasets
+                if item.name in ['semantic_drone_dataset', 'udd6_dataset', output_dir.name]:
+                    continue
+                    
+                if item.is_dir():
+                    # Check modification time (should be recent)
+                    mod_time = item.stat().st_mtime
+                    if current_time - mod_time < 300:  # Modified in last 5 minutes
+                        extracted_items.append(item)
+            
+            # Also check for nested extraction (kaggle sometimes creates nested dirs)
+            for item in self.base_dir.iterdir():
+                if item.is_dir() and item.name not in ['semantic_drone_dataset', 'udd6_dataset', output_dir.name]:
+                    for subitem in item.iterdir():
+                        if subitem.is_dir():
+                            # Check if subdir has dataset characteristics
+                            dataset_keywords = [
+                                dataset_name.split('/')[-1].lower().replace('-', ''),
+                                'medium', 'dataset'
+                            ]
+                            if any(keyword in subitem.name.lower().replace('-', '') for keyword in dataset_keywords):
+                                extracted_items.append(subitem)
+                                break
+            
+            if extracted_items:
+                # Use the most appropriate directory (prefer non-nested)
+                source_dir = extracted_items[0]
+                if len(extracted_items) > 1:
+                    # Prefer directory with more specific dataset name
+                    for item in extracted_items:
+                        if 'medium' in item.name.lower() or 'deploy' in item.name.lower():
+                            source_dir = item
+                            break
                 
-                # Move to final destination
-                temp_path = Path(temp_dir)
-                for item in temp_path.iterdir():
-                    if item.is_dir():
-                        shutil.move(str(item), str(output_dir))
-                    else:
-                        shutil.move(str(item), str(output_dir / item.name))
+                if source_dir != output_dir:
+                    if output_dir.exists():
+                        shutil.rmtree(output_dir)
+                    shutil.move(str(source_dir), str(output_dir))
+                    print(f"📁 Moved {source_dir.name} -> {output_dir.name}")
+                    
+                    # Clean up empty parent directory if it exists
+                    if source_dir.parent != self.base_dir and source_dir.parent.exists():
+                        try:
+                            source_dir.parent.rmdir()
+                            print(f"🗑️  Cleaned up empty directory {source_dir.parent.name}")
+                        except OSError:
+                            pass  # Directory not empty, leave it
+            else:
+                # Check if files were extracted directly to base_dir
+                potential_files = [f for f in self.base_dir.iterdir() 
+                                 if f.is_file() and f.suffix.lower() in ['.jpg', '.png', '.txt', '.csv']]
+                if potential_files:
+                    # Move files to output directory
+                    output_dir.mkdir(exist_ok=True)
+                    for file in potential_files:
+                        shutil.move(str(file), str(output_dir / file.name))
+                    print(f"📁 Moved {len(potential_files)} files to {output_dir.name}")
+                else:
+                    print(f"⚠️  No extracted content found for {dataset_name}")
+                    print(f"   Available directories: {[d.name for d in self.base_dir.iterdir() if d.is_dir()]}")
+                    return False
+            
+            # Clean up any remaining zip files
+            for zip_file in self.base_dir.glob("*.zip"):
+                if zip_file.name.startswith(dataset_name.split('/')[-1]):
+                    zip_file.unlink()
+                    print(f"🗑️  Cleaned up {zip_file.name}")
             
             return True
             
@@ -286,17 +388,9 @@ class DatasetDownloader:
                     # Clean up archive
                     archive_path.unlink()
                     
-            elif config['source'] == 'github_release':
-                # GitHub release download logic
-                repo = config['repo']
-                tag = config['release_tag']
-                filename = config['filename']
-                
-                url = f"https://github.com/{repo}/releases/download/{tag}/{filename}"
-                archive_path = self.base_dir / filename
-                
-                success = self.download_file_with_progress(url, archive_path)
-                
+            elif config['source'] == 'google_drive':
+                archive_path = self.base_dir / config['filename']
+                success = self.download_from_google_drive(config['file_id'], archive_path)
                 if success and archive_path.exists():
                     success = self.extract_archive(archive_path, dataset_dir)
                     # Clean up archive
