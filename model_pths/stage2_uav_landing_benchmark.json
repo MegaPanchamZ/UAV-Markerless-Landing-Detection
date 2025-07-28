@@ -1,16 +1,16 @@
 {
-  "model_path": "model_pths/stage3_uav_landing.onnx",
+  "model_path": "model_pths/stage2_uav_landing.onnx",
   "input_size": [
     512,
     512
   ],
   "benchmark_stats": {
-    "mean_ms": 6.923551559448242,
-    "std_ms": 0.6012387582167218,
-    "min_ms": 6.2274932861328125,
-    "max_ms": 11.20305061340332,
-    "median_ms": 6.835341453552246,
-    "fps": 144.43454221632066
+    "mean_ms": 6.746020317077637,
+    "std_ms": 0.42534078586306906,
+    "min_ms": 6.093502044677734,
+    "max_ms": 8.207082748413086,
+    "median_ms": 6.700277328491211,
+    "fps": 148.23554525450913
   },
   "model_info": {
     "file_size_mb": 6.380415916442871,
@@ -51,5 +51,5 @@
     ],
     "node_count": 181
   },
-  "timestamp": 1753692630.806626
+  "timestamp": 1753692726.346101
 }
