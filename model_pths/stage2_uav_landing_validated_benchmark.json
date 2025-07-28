@@ -1,0 +1,55 @@
+{
+  "model_path": "model_pths/stage2_uav_landing_validated.onnx",
+  "input_size": [
+    512,
+    512
+  ],
+  "benchmark_stats": {
+    "mean_ms": 6.925206184387207,
+    "std_ms": 0.47038840699508794,
+    "min_ms": 5.737066268920898,
+    "max_ms": 8.672714233398438,
+    "median_ms": 6.9065093994140625,
+    "fps": 144.4000327751234
+  },
+  "model_info": {
+    "file_size_mb": 6.380415916442871,
+    "opset_version": 11,
+    "inputs": [
+      {
+        "name": "input",
+        "type": 1,
+        "shape": [
+          0,
+          3,
+          512,
+          512
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "main_output",
+        "type": 1,
+        "shape": [
+          0,
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "uncertainty_output",
+        "type": 1,
+        "shape": [
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    ],
+    "node_count": 181
+  },
+  "timestamp": 1753692442.663154
+}

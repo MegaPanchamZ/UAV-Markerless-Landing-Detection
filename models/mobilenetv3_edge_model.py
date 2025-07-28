@@ -49,7 +49,7 @@ class LegacyEdgeLandingNet(nn.Module):
             nn.BatchNorm2d(128),                                        # seg_head.1
             None,  # seg_head.2 (doesn't exist)
             None,  # seg_head.3 (doesn't exist)
-            nn.Conv2d(128, self.num_classes, kernel_size=1, bias=False) # seg_head.4
+            nn.Conv2d(128, self.num_classes, kernel_size=1, bias=True)  # seg_head.4 (has bias!)
         ])
 
         # Exact uncertainty head structure from checkpoint
@@ -58,7 +58,7 @@ class LegacyEdgeLandingNet(nn.Module):
                 nn.Conv2d(128, 64, kernel_size=3, padding=1, bias=False),  # uncertainty_head.0
                 nn.BatchNorm2d(64),                                        # uncertainty_head.1
                 None,  # uncertainty_head.2 (doesn't exist)
-                nn.Conv2d(64, 1, kernel_size=1, bias=False)               # uncertainty_head.3
+                nn.Conv2d(64, 1, kernel_size=1, bias=True)                # uncertainty_head.3 (has bias!)
             ])
         
         self._initialize_weights()
