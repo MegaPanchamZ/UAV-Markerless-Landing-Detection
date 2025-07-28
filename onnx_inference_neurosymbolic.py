@@ -203,7 +203,6 @@ class ONNXNeuroSymbolicInference:
           type nearby_surface(i32, i32, String)
           type landing_space_available(i32, i32, i32)
           type prediction_confidence(i32, i32, f32)
-          type avg_uncertainty(f32)
           type local_area_safe(i32, i32)
           type sufficient_space(i32, i32)
           type high_confidence_prediction(i32, i32)
@@ -218,16 +217,10 @@ class ONNXNeuroSymbolicInference:
           type unsuitable_due_to_size(i32, i32)
           type unsuitable_due_to_confidence(i32, i32)
 
-          // Define stage-specific surfaces for Scallop
-          if self.stage == 2:
-            # Stage 2: `vegetation` is ambiguous (grass vs. trees), so treat it as uncertain.
-            safe_surfaces = '{"ground"}'
-            hazardous_surfaces = '{"building", "water", "car"}'
-            uncertain_surfaces = '{"clutter", "vegetation"}'
-          else:  # Default to stage 3
-            safe_surfaces = '{"road", "vegetation", "roof"}'
-            hazardous_surfaces = '{"vehicle", "facade"}'
-            uncertain_surfaces = '{"other"}'
+          // Define safe and hazardous surfaces based on stage
+          rel safe_surface = {safe_surfaces}
+          rel hazardous_surface = {hazardous_surfaces}
+          rel uncertain_surface = {uncertain_surfaces}
 
           // Find max surface area
           rel max_surface_area(a) = a := max(area: surface_area(_, area))
@@ -244,11 +237,6 @@ class ONNXNeuroSymbolicInference:
           rel local_area_safe(x, y) = nearby_surface(x, y, s) and safe_surface(s)
           rel sufficient_space(x, y) = landing_space_available(x, y, space) and space > 20
           rel high_confidence_prediction(x, y) = prediction_confidence(x, y, c) and c > 0.4
-
-          rel suitable_landing_zone(x, y) =
-            local_area_safe(x, y) and
-            sufficient_space(x, y) and
-            high_confidence_prediction(x, y)
 
           // Overall mission safety assessment
           rel mission_safety_level("safe") = area_safety_score(s) and s > 0.7
