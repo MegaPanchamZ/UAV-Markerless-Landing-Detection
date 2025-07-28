@@ -90,7 +90,7 @@ class ONNXNeuroSymbolicInference:
         self,
         onnx_model_path: str,
         input_size: Tuple[int, int] = (512, 512),
-        confidence_threshold: float = 0.5,
+        confidence_threshold: float = 0.4,
         providers: Optional[List[str]] = None,
         use_scallop: bool = True,
         stage: int = 3
@@ -209,13 +209,25 @@ class ONNXNeuroSymbolicInference:
           type high_confidence_prediction(i32, i32)
           type suitable_landing_zone(i32, i32)
           type mission_safety_level(String)
-          type prediction_reliable()
+          type can_land()
           type landing_recommendation(String)
 
-          // Define safe and hazardous surfaces based on stage
-          rel safe_surface = {safe_surfaces}
-          rel hazardous_surface = {hazardous_surfaces}
-          rel uncertain_surface = {uncertain_surfaces}
+          // Explainability: types for rejection reasons
+          type potential_zone(i32, i32)
+          type unsuitable_due_to_class(i32, i32)
+          type unsuitable_due_to_size(i32, i32)
+          type unsuitable_due_to_confidence(i32, i32)
+
+          // Define stage-specific surfaces for Scallop
+          if self.stage == 2:
+            # Stage 2: `vegetation` is ambiguous (grass vs. trees), so treat it as uncertain.
+            safe_surfaces = '{"ground"}'
+            hazardous_surfaces = '{"building", "water", "car"}'
+            uncertain_surfaces = '{"clutter", "vegetation"}'
+          else:  # Default to stage 3
+            safe_surfaces = '{"road", "vegetation", "roof"}'
+            hazardous_surfaces = '{"vehicle", "facade"}'
+            uncertain_surfaces = '{"other"}'
 
           // Find max surface area
           rel max_surface_area(a) = a := max(area: surface_area(_, area))
@@ -231,7 +243,7 @@ class ONNXNeuroSymbolicInference:
           // Landing zone evaluation
           rel local_area_safe(x, y) = nearby_surface(x, y, s) and safe_surface(s)
           rel sufficient_space(x, y) = landing_space_available(x, y, space) and space > 20
-          rel high_confidence_prediction(x, y) = prediction_confidence(x, y, c) and c > 0.5
+          rel high_confidence_prediction(x, y) = prediction_confidence(x, y, c) and c > 0.4
 
           rel suitable_landing_zone(x, y) =
             local_area_safe(x, y) and
@@ -243,13 +255,28 @@ class ONNXNeuroSymbolicInference:
           rel mission_safety_level("caution") = area_safety_score(s) and s > 0.4 and s <= 0.7
           rel mission_safety_level("danger") = area_safety_score(s) and s <= 0.4
 
-          // Uncertainty handling
-          rel prediction_reliable() = avg_uncertainty(u) and u < 0.5
+          // Explainability: A zone is a potential candidate if we have info about its size
+          rel potential_zone(x, y) = landing_space_available(x, y, _)
+
+          // Explainability: Check failure conditions
+          rel unsuitable_due_to_class(x, y) = potential_zone(x, y) and not local_area_safe(x, y)
+          rel unsuitable_due_to_size(x, y) = potential_zone(x, y) and not sufficient_space(x, y)
+          rel unsuitable_due_to_confidence(x, y) = potential_zone(x, y) and not high_confidence_prediction(x, y)
+
+          // A zone is suitable if it's a potential zone and not unsuitable for any reason
+          rel suitable_landing_zone(x, y) =
+            potential_zone(x, y) and
+            not unsuitable_due_to_class(x, y) and
+            not unsuitable_due_to_size(x, y) and
+            not unsuitable_due_to_confidence(x, y)
+
+          // NEW: Base landing recommendation on finding a suitable zone, not global confidence
+          rel can_land() = exists(x, y: suitable_landing_zone(x, y))
 
           // Landing recommendations
-          rel landing_recommendation("proceed_landing") = mission_safety_level("safe") and prediction_reliable()
-          rel landing_recommendation("caution_landing") = mission_safety_level("caution") and prediction_reliable()
-          rel landing_recommendation("abort_landing") = mission_safety_level("danger") or not prediction_reliable()
+          rel landing_recommendation("proceed_landing") = mission_safety_level("safe") and can_land()
+          rel landing_recommendation("caution_landing") = mission_safety_level("caution") and can_land()
+          rel landing_recommendation("abort_landing") = mission_safety_level("danger") or not can_land()
         """
 
         try:
@@ -346,7 +373,7 @@ class ONNXNeuroSymbolicInference:
             'probabilities': probabilities,
             'confidence_map': confidence_map
         }
-
+    
     def analyze_landing_zones(self, predictions: np.ndarray, confidence_map: Optional[np.ndarray] = None) -> Dict:
         """Analyze predictions to find suitable landing zones."""
         
@@ -371,45 +398,46 @@ class ONNXNeuroSymbolicInference:
         else: # stage 3
             safe_classes = ['road', 'vegetation', 'roof']
 
-        # Find semantically safe areas
-        semantic_safe_mask = np.zeros_like(predictions, dtype=bool)
-        for class_name in safe_classes:
-            if class_name in class_stats:
-                semantic_safe_mask |= class_stats[class_name]['mask']
-        
-        # Find connected components from semantic mask
-        num_labels, labels = cv2.connectedComponents(semantic_safe_mask.astype(np.uint8))
-        
         landing_zones = []
         confident_safe_mask = np.zeros_like(predictions, dtype=bool)
 
-        for label in range(1, num_labels):  # Skip background
-            zone_mask = (labels == label)
-            zone_area = np.sum(zone_mask)
-
-            if zone_area <= 100: # Min zone size
+        # Process each safe class separately to preserve class identity for each zone
+        for class_name in safe_classes:
+            if class_name not in class_stats:
                 continue
+            
+            # Find connected components for this specific safe class
+            class_mask = class_stats[class_name]['mask']
+            num_labels, labels = cv2.connectedComponents(class_mask.astype(np.uint8))
+            
+            for label in range(1, num_labels):
+                zone_mask = (labels == label)
+                zone_area = np.sum(zone_mask)
 
-            # Filter zones by their average confidence
-            if confidence_map is not None:
-                zone_avg_confidence = np.mean(confidence_map[zone_mask])
-                if zone_avg_confidence < self.confidence_threshold:
-                    continue # Skip low-confidence zones
-            
-            # If we reach here, the zone is good. Add it to the final confident mask.
-            confident_safe_mask |= zone_mask
-            
-            # Find centroid for this confident zone
-            y_coords, x_coords = np.where(zone_mask)
-            centroid_x = int(np.mean(x_coords))
-            centroid_y = int(np.mean(y_coords))
-            
-            landing_zones.append({
-                'centroid': (centroid_x, centroid_y),
-                'area': int(zone_area),
-                'mask': zone_mask
-            })
-        
+                if zone_area <= 100:
+                    continue
+                
+                # Filter zones by their average confidence
+                if confidence_map is not None:
+                    zone_avg_confidence = np.mean(confidence_map[zone_mask])
+                    if zone_avg_confidence < self.confidence_threshold:
+                        continue
+                
+                # Add to the final confident mask for visualization
+                confident_safe_mask |= zone_mask
+                
+                # Find centroid for this confident zone
+                y_coords, x_coords = np.where(zone_mask)
+                centroid_x = int(np.mean(x_coords))
+                centroid_y = int(np.mean(y_coords))
+                
+                landing_zones.append({
+                    'centroid': (centroid_x, centroid_y),
+                    'area': int(zone_area),
+                    'mask': zone_mask,
+                    'class_name': class_name  # Store the class of the zone
+                })
+
         # Sort by area (largest first)
         landing_zones.sort(key=lambda x: x['area'], reverse=True)
         
@@ -422,14 +450,14 @@ class ONNXNeuroSymbolicInference:
     
     def run_scallop_reasoning(self, analysis: Dict) -> Dict:
         """Run Scallop-based neuro-symbolic reasoning."""
-
+        
         if not self.use_scallop or self.scallop_ctx is None:
             return {'reasoning_enabled': False}
-
+        
         try:
             # Clone the context to keep the base program but allow for new facts
             reasoning_ctx = self.scallop_ctx.clone()
-
+            
             # Add surface area facts
             surface_area_facts = []
             for class_name, stats in analysis['class_stats'].items():
@@ -448,9 +476,8 @@ class ONNXNeuroSymbolicInference:
                 area = int(zone['area'])
                 landing_space_facts.append((x, y, area))
 
-                # Simplified nearby surface
-                dominant_class = max(analysis['class_stats'].items(), key=lambda item: item[1]['percentage'])[0]
-                nearby_surface_facts.append((x, y, str(dominant_class)))
+                # FIXED: Use the actual class of the zone, not the global dominant class
+                nearby_surface_facts.append((x, y, str(zone['class_name'])))
 
                 # Per-zone confidence
                 if 'confidence_map' in analysis and analysis['confidence_map'] is not None:
@@ -463,27 +490,28 @@ class ONNXNeuroSymbolicInference:
                 reasoning_ctx.add_facts("nearby_surface", nearby_surface_facts)
             if prediction_confidence_facts:
                 reasoning_ctx.add_facts("prediction_confidence", prediction_confidence_facts)
-
-            # Add overall confidence fact
-            if 'confidence_map' in analysis and analysis['confidence_map'] is not None:
-                avg_confidence = float(np.mean(analysis['confidence_map']))
-                reasoning_ctx.add_facts("avg_uncertainty", [(1.0 - avg_confidence,)])
-
+            
             # Run reasoning
             reasoning_ctx.run()
-
-            # Extract results
+            
+            # Extract results with explainability
+            rejection_reasons = {
+                'class': len(list(reasoning_ctx.relation("unsuitable_due_to_class"))),
+                'size': len(list(reasoning_ctx.relation("unsuitable_due_to_size"))),
+                'confidence': len(list(reasoning_ctx.relation("unsuitable_due_to_confidence"))),
+            }
             reasoning_results = {
                 'reasoning_enabled': True,
                 'area_safety_score': list(reasoning_ctx.relation("area_safety_score")),
                 'suitable_landing_zones': list(reasoning_ctx.relation("suitable_landing_zone")),
                 'mission_safety_level': list(reasoning_ctx.relation("mission_safety_level")),
                 'landing_recommendation': list(reasoning_ctx.relation("landing_recommendation")),
-                'prediction_reliable': list(reasoning_ctx.relation("prediction_reliable"))
+                'landing_possible': list(reasoning_ctx.relation("can_land")),
+                'rejection_reasons': rejection_reasons,
             }
-
+            
             return reasoning_results
-
+            
         except Exception as e:
             print(f"⚠️  Scallop reasoning failed: {e}")
             return {'reasoning_enabled': False, 'error': str(e)}
@@ -625,11 +653,23 @@ class ONNXNeuroSymbolicInference:
             # Landing zones
             suitable_zones = reasoning.get('suitable_landing_zones', [])
             reasoning_text += f"Suitable Zones: {len(suitable_zones)}\n"
+            
+            # Reliability based on finding a zone
+            landing_possible = reasoning.get('landing_possible', [])
+            is_possible = len(landing_possible) > 0
+            reasoning_text += f"Landing Possible: {is_possible}\n"
 
-            # Reliability
-            reliable = reasoning.get('prediction_reliable', [])
-            is_reliable = len(reliable) > 0
-            reasoning_text += f"Prediction Reliable: {is_reliable}\n"
+            # Explainability: Add rejection reasons
+            reasons = reasoning.get('rejection_reasons', {})
+            rejection_count = sum(reasons.values())
+            if not is_possible and rejection_count > 0 and len(analysis['landing_zones']) > 0:
+                reasoning_text += "\nRejection Reasons:\n"
+                if reasons.get('class', 0) > 0:
+                    reasoning_text += f"- Unsafe Surface: {reasons['class']} zones\n"
+                if reasons.get('size', 0) > 0:
+                    reasoning_text += f"- Insufficient Size: {reasons['size']} zones\n"
+                if reasons.get('confidence', 0) > 0:
+                    reasoning_text += f"- Low Confidence: {reasons['confidence']} zones\n"
         else:
             reasoning_text += "Reasoning disabled or failed"
 
@@ -732,7 +772,7 @@ def main():
                         help='Path to ONNX model file')
     parser.add_argument('--input_size', type=int, nargs=2, default=[512, 512],
                         help='Input image size (height width)')
-    parser.add_argument('--confidence_threshold', type=float, default=0.5,
+    parser.add_argument('--confidence_threshold', type=float, default=0.4,
                         help='Confidence threshold for predictions')
     parser.add_argument('--no_scallop', action='store_true',
                         help='Disable Scallop neuro-symbolic reasoning')
