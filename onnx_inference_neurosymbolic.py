@@ -233,6 +233,10 @@ class ONNXNeuroSymbolicInference:
             # Assume BGR and convert to RGB
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         
+        # FIXED: Resize the image before applying other transforms
+        # This ensures the input dimensions match the model's expected size.
+        image = cv2.resize(image, self.input_size, interpolation=cv2.INTER_LINEAR)
+
         # Apply transforms (albumentations expects named arguments)
         transformed = self.transform(image=image)
         tensor = transformed['image']
@@ -476,8 +480,8 @@ class ONNXNeuroSymbolicInference:
         analysis = result['analysis']
         reasoning = result['reasoning']
         
-        # Create visualization
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        # Create visualization, adjusted for legend
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
         
         # Original image
         axes[0, 0].imshow(image)
@@ -493,6 +497,19 @@ class ONNXNeuroSymbolicInference:
         axes[0, 1].set_title("Segmentation Prediction")
         axes[0, 1].axis('off')
         
+        # Add legend for segmentation colors
+        patches = [
+            plt.matplotlib.patches.Patch(color=np.array(c) / 255.0, label=n)
+            for n, c in zip(self.CLASS_NAMES, self.CLASS_COLORS)
+        ]
+        axes[0, 1].legend(
+            handles=patches,
+            bbox_to_anchor=(1.05, 1),
+            loc="upper left",
+            borderaxespad=0.0,
+            fontsize="small",
+        )
+        
         # Confidence map
         if confidence_map is not None:
             im = axes[0, 2].imshow(confidence_map, cmap='viridis', vmin=0, vmax=1)
@@ -506,16 +523,27 @@ class ONNXNeuroSymbolicInference:
         
         # Safe landing areas
         safe_visualization = image.copy()
+        original_h, original_w = image.shape[:2]
         if analysis['safe_mask'] is not None:
-            safe_visualization[analysis['safe_mask']] = [0, 255, 0]  # Green overlay
-        
+            # Resize mask to original image dimensions for accurate overlay
+            safe_mask_resized = cv2.resize(
+                analysis['safe_mask'].astype(np.uint8),
+                (original_w, original_h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+            safe_visualization[safe_mask_resized] = [0, 255, 0]  # Green overlay
+
         # Mark landing zones
         for i, zone in enumerate(analysis['landing_zones'][:3]):  # Top 3 zones
             x, y = zone['centroid']
-            cv2.circle(safe_visualization, (x, y), 20, (255, 0, 0), 3)
-            cv2.putText(safe_visualization, f"{i+1}", (x-5, y+5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        
+            # Scale centroid coordinates from prediction space to original image space
+            scaled_x = int(x * original_w / self.input_size[1])
+            scaled_y = int(y * original_h / self.input_size[0])
+
+            cv2.circle(safe_visualization, (scaled_x, scaled_y), 20, (255, 0, 0), 3)
+            cv2.putText(safe_visualization, f"{i+1}", (scaled_x - 5, scaled_y + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
         axes[1, 0].imshow(safe_visualization)
         axes[1, 0].set_title("Landing Zones")
         axes[1, 0].axis('off')
@@ -572,9 +600,11 @@ class ONNXNeuroSymbolicInference:
         
         # Convert to image array
         fig.canvas.draw()
-        img_array = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        img_array = img_array.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        
+        # The `tostring_rgb` method is deprecated. The modern approach is to
+        # get the RGBA buffer and convert it to BGR for OpenCV.
+        img_array = np.asarray(fig.canvas.buffer_rgba())
+        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2BGR)
+
         plt.close(fig)
         
         return img_array
@@ -626,6 +656,24 @@ class ONNXNeuroSymbolicInference:
         return stats
 
 
+def list_available_cameras(max_cameras_to_check=10):
+    """Lists available camera devices."""
+    available_cameras = []
+    print("📷 Checking for available webcams...")
+    for i in range(max_cameras_to_check):
+        cap = cv2.VideoCapture(i, cv2.CAP_ANY)
+        if cap.isOpened():
+            available_cameras.append(i)
+            cap.release()
+    
+    if not available_cameras:
+        print("❌ No webcams found.")
+    else:
+        print(f"✅ Found camera indices: {available_cameras}")
+            
+    return available_cameras
+
+
 def main():
     parser = argparse.ArgumentParser(description='ONNX Neuro-Symbolic UAV Landing Inference')
     
@@ -642,7 +690,10 @@ def main():
     # Input options
     input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument('--image', type=str, help='Input image file')
-    input_group.add_argument('--webcam', action='store_true', help='Use webcam input')
+    input_group.add_argument(
+        '--webcam', nargs='?', const=-1, type=int, default=None,
+        help='Use webcam input. Optionally specify camera index. If no index is given, a list of available cameras will be shown.'
+    )
     input_group.add_argument('--benchmark', action='store_true', help='Run performance benchmark')
     
     # Output options
@@ -754,18 +805,44 @@ def main():
             
             print(f"✅ Image processing complete")
             
-        elif args.webcam:
+        elif args.webcam is not None:
             # Real-time webcam processing
-            print(f"📹 Starting webcam inference...")
+            camera_index = args.webcam
+            
+            if camera_index == -1:  # --webcam was used without an index
+                available_cameras = list_available_cameras()
+                if not available_cameras:
+                    return
+                
+                if len(available_cameras) == 1:
+                    camera_index = available_cameras[0]
+                    print(f"   Automatically selecting camera index {camera_index}")
+                else:
+                    try:
+                        choice = input(f"   Please select a camera index from {available_cameras}: ")
+                        camera_index = int(choice)
+                        if camera_index not in available_cameras:
+                            print(f"❌ Invalid selection. Please choose from {available_cameras}.")
+                            return
+                    except (ValueError, EOFError):
+                        print("\n❌ Invalid input. Exiting.")
+                        return
+
+            print(f"📹 Starting webcam inference on camera index {camera_index}...")
             print(f"   Press 'q' to quit, 's' to save frame")
             
-            cap = cv2.VideoCapture(0)
+            cap = cv2.VideoCapture(camera_index)
+            if not cap.isOpened():
+                print(f"❌ Could not open webcam with index {camera_index}.")
+                return
+
             frame_count = 0
             
             try:
                 while True:
                     ret, frame = cap.read()
                     if not ret:
+                        print("❌ Failed to grab frame from webcam. Exiting.")
                         break
                     
                     # Run inference
@@ -802,7 +879,7 @@ def main():
             print(f"📹 Webcam session ended")
             
         else:
-            print("❌ Please specify --image, --webcam, or --benchmark")
+            parser.print_help()
             return
             
     except Exception as e:
