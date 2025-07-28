@@ -17,6 +17,94 @@ from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 from typing import Dict, Optional, Union
 import warnings
 
+
+# ==============================================================================
+# LEGACY MODEL DEFINITION - DO NOT MODIFY
+# This class represents the architecture that was used to save the old
+# checkpoints (like stage2_best.pth). It is preserved for backward compatibility.
+# ==============================================================================
+class LegacyEdgeLandingNet(nn.Module):
+    """
+    This is the legacy architecture that matches your saved `stage2_best.pth`.
+    Based on checkpoint analysis, here's the exact structure:
+    - seg_head.0: Conv2d(576, 128, 3x3)
+    - seg_head.1: BatchNorm2d(128)  
+    - seg_head.4: Conv2d(128, 6, 1x1)
+    - uncertainty_head.0: Conv2d(128, 64, 3x3)
+    - uncertainty_head.1: BatchNorm2d(64)
+    - uncertainty_head.3: Conv2d(64, 1, 1x1)
+    """
+    def __init__(self, num_classes: int = 6, backbone_pretrained: bool = True, use_uncertainty: bool = False, dropout: float=0.2):
+        super().__init__()
+        self.num_classes = num_classes
+        self.use_uncertainty = use_uncertainty
+        
+        weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if backbone_pretrained else None
+        self.backbone = mobilenet_v3_small(weights=weights)
+        # Note: Keep the classifier as it exists in the checkpoint
+        
+        # Exact segmentation head structure from checkpoint
+        self.seg_head = nn.ModuleList([
+            nn.Conv2d(576, 128, kernel_size=3, padding=1, bias=False),  # seg_head.0
+            nn.BatchNorm2d(128),                                        # seg_head.1
+            None,  # seg_head.2 (doesn't exist)
+            None,  # seg_head.3 (doesn't exist)
+            nn.Conv2d(128, self.num_classes, kernel_size=1, bias=False) # seg_head.4
+        ])
+
+        # Exact uncertainty head structure from checkpoint
+        if use_uncertainty:
+            self.uncertainty_head = nn.ModuleList([
+                nn.Conv2d(128, 64, kernel_size=3, padding=1, bias=False),  # uncertainty_head.0
+                nn.BatchNorm2d(64),                                        # uncertainty_head.1
+                None,  # uncertainty_head.2 (doesn't exist)
+                nn.Conv2d(64, 1, kernel_size=1, bias=False)               # uncertainty_head.3
+            ])
+        
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
+        input_shape = x.shape[-2:]
+        features = self.backbone.features(x)  # [B, 576, H/16, W/16]
+        
+        # Apply segmentation head layers exactly as they were saved
+        x_seg = self.seg_head[0](features)  # Conv: 576->128
+        x_seg = self.seg_head[1](x_seg)     # BatchNorm
+        x_seg = F.relu(x_seg, inplace=True) # ReLU (not saved as a parameter)
+        seg_logits = self.seg_head[4](x_seg)  # Conv: 128->6 (final prediction)
+        
+        # Upsample to input size
+        seg_logits = F.interpolate(seg_logits, size=input_shape, mode='bilinear', align_corners=False)
+
+        if not self.use_uncertainty:
+            return seg_logits
+            
+        # Apply uncertainty head
+        x_unc = self.uncertainty_head[0](x_seg)  # Conv: 128->64
+        x_unc = self.uncertainty_head[1](x_unc)  # BatchNorm  
+        x_unc = F.relu(x_unc, inplace=True)      # ReLU (not saved as a parameter)
+        uncertainty = self.uncertainty_head[3](x_unc)  # Conv: 64->1
+        uncertainty = torch.sigmoid(uncertainty)  # Sigmoid (not saved as a parameter)
+        
+        # Upsample to input size
+        uncertainty = F.interpolate(uncertainty, size=input_shape, mode='bilinear', align_corners=False)
+        
+        return {'main': seg_logits, 'uncertainty': uncertainty}
+
+
+# ==============================================================================
+# CURRENT (NEW) MODEL DEFINITION
+# ==============================================================================
 class EdgeLandingNet(nn.Module):
     """
     MobileNetV3-Small + Custom Segmentation Head for UAV Landing Detection.
@@ -119,26 +207,14 @@ class EdgeLandingNet(nn.Module):
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Forward pass.
-        
-        Args:
-            x: Input tensor [B, 3, H, W]
-            
-        Returns:
-            If use_uncertainty=False: Segmentation logits [B, num_classes, H, W]
-            If use_uncertainty=True: Dict with 'main' (logits) and 'uncertainty' keys
         """
-        # Extract features with MobileNetV3
         features = self.backbone.features(x)  # [B, 576, H/16, W/16]
-        
-        # Generate segmentation
         seg_logits = self.seg_head(features)  # [B, num_classes, H, W]
         
         if not self.use_uncertainty:
             return seg_logits
         
-        # Generate uncertainty map if requested
-        uncertainty = self.uncertainty_head(features)  # [B, 1, H/16, W/16]
-        # Upsample uncertainty to match segmentation resolution
+        uncertainty = self.uncertainty_head(features)
         uncertainty = F.interpolate(
             uncertainty, 
             size=seg_logits.shape[-2:], 
@@ -152,27 +228,13 @@ class EdgeLandingNet(nn.Module):
         }
     
     def count_parameters(self) -> int:
-        """Count total trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
-    def get_model_size_mb(self) -> float:
-        """Estimate model size in MB."""
-        param_size = sum(p.numel() * p.element_size() for p in self.parameters())
-        buffer_size = sum(b.numel() * b.element_size() for b in self.buffers())
-        return (param_size + buffer_size) / (1024 * 1024)
 
 
 class EnhancedEdgeLandingNet(nn.Module):
     """
     Enhanced edge-optimized landing detection network with multi-scale features.
-    
-    Features:
-    - MobileNetV3-Small backbone (2.5MB)
-    - Multi-scale feature fusion
-    - Lightweight segmentation head
-    - Optional uncertainty estimation
     """
-    
     def __init__(
         self, 
         num_classes: int = 6, 
@@ -185,141 +247,105 @@ class EnhancedEdgeLandingNet(nn.Module):
         self.num_classes = num_classes
         self.use_uncertainty = use_uncertainty
         
-        # Load MobileNetV3-Small backbone
+        # MobileNetV3-Small backbone with multi-scale feature extraction
         weights = MobileNet_V3_Small_Weights.IMAGENET1K_V1 if backbone_pretrained else None
         mobilenet = mobilenet_v3_small(weights=weights)
         
-        # Extract feature extraction stages
-        self.stem = nn.Sequential(*list(mobilenet.features)[:2])    # [B, 16, H/2, W/2]
-        self.stage1 = nn.Sequential(*list(mobilenet.features)[2:4]) # [B, 16, H/4, W/4]  
-        self.stage2 = nn.Sequential(*list(mobilenet.features)[4:7]) # [B, 24, H/8, W/8]
-        self.stage3 = nn.Sequential(*list(mobilenet.features)[7:11]) # [B, 40, H/16, W/16]
-        self.stage4 = nn.Sequential(*list(mobilenet.features)[11:]) # [B, 576, H/16, W/16]
+        # Extract feature stages for multi-scale processing
+        self.stem = nn.Sequential(*list(mobilenet.features)[:2])
+        self.stage1 = nn.Sequential(*list(mobilenet.features)[2:4])
+        self.stage2 = nn.Sequential(*list(mobilenet.features)[4:7])
+        self.stage3 = nn.Sequential(*list(mobilenet.features)[7:11])
+        self.stage4 = nn.Sequential(*list(mobilenet.features)[11:])
         
-        # Fix: Calculate actual output channels from MobileNetV3
-        # Let's create a test tensor to get the actual dimensions
-        test_x = torch.randn(1, 3, 512, 512)
+        # Dynamically determine channel dimensions
         with torch.no_grad():
-            x1 = self.stem(test_x)
-            x2 = self.stage1(x1) 
-            x3 = self.stage2(x2)
+            test_x = torch.randn(1, 3, 512, 512)
+            x3 = self.stage2(self.stage1(self.stem(test_x)))
             x4 = self.stage3(x3)
             x5 = self.stage4(x4)
-            
-        # Get actual channel dimensions
-        stage3_channels = x3.shape[1]  # Should be 24
-        stage4_channels = x4.shape[1]  # Should be 40  
-        stage5_channels = x5.shape[1]  # Should be 576
         
+        stage3_channels = x3.shape[1]
+        stage4_channels = x4.shape[1]
+        stage5_channels = x5.shape[1]
         total_channels = stage3_channels + stage4_channels + stage5_channels
-        print(f"Actual fusion channels: {stage3_channels} + {stage4_channels} + {stage5_channels} = {total_channels}")
         
-        # Multi-scale feature fusion
+        # Feature fusion layer
         self.fusion_conv = nn.Conv2d(total_channels, 256, 1, bias=False)
         self.fusion_bn = nn.BatchNorm2d(256)
         self.fusion_relu = nn.ReLU(inplace=True)
         
-        # Lightweight decoder
+        # Progressive upsampling decoder
         self.decoder = nn.Sequential(
-            # Upsampling block 1: 16x16 -> 32x32
             nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             
-            # Upsampling block 2: 32x32 -> 64x64
             nn.ConvTranspose2d(128, 64, 4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             
-            # Upsampling block 3: 64x64 -> 128x128
             nn.ConvTranspose2d(64, 32, 4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             
-            # Upsampling block 4: 128x128 -> 256x256
             nn.ConvTranspose2d(32, 16, 4, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(16),
             nn.ReLU(inplace=True),
             
-            # Final prediction: 256x256 -> 512x512
             nn.ConvTranspose2d(16, num_classes, 4, stride=2, padding=1),
         )
         
-        # Optional uncertainty estimation
+        # Uncertainty estimation head
         if use_uncertainty:
             self.uncertainty_head = nn.Sequential(
                 nn.Conv2d(256, 128, 3, padding=1, bias=False),
                 nn.BatchNorm2d(128),
                 nn.ReLU(inplace=True),
                 nn.Dropout2d(dropout),
-                nn.Conv2d(128, 1, 1),  # Single channel for uncertainty
+                nn.Conv2d(128, 1, 1),
                 nn.Sigmoid()
             )
         
-        # Initialize weights
         self._init_weights()
-        
-        print(f"🚁 EnhancedEdgeLandingNet initialized:")
-        print(f"   Multi-scale features: ✓")
-        print(f"   Parameters: {sum(p.numel() for p in self.parameters()):,}")
-        print(f"   Estimated size: {sum(p.numel() for p in self.parameters()) * 4 / 1e6:.1f}MB")
-    
+        print(f"🚁 EnhancedEdgeLandingNet initialized: Params: {self.count_parameters():,}")
+
     def _init_weights(self):
-        """Initialize weights for custom layers."""
-        for m in [self.fusion_conv, self.decoder]:
+        for m in [self.fusion_conv, self.decoder, self.uncertainty_head if self.use_uncertainty else nn.Identity()]:
             for module in m.modules():
                 if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):
                     nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
-                    if module.bias is not None:
-                        nn.init.constant_(module.bias, 0)
                 elif isinstance(module, nn.BatchNorm2d):
                     nn.init.constant_(module.weight, 1)
                     nn.init.constant_(module.bias, 0)
     
     def forward(self, x: torch.Tensor) -> Union[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Forward pass with multi-scale feature fusion."""
         # Multi-scale feature extraction
-        x1 = self.stem(x)         # [B, 16, H/2, W/2]
-        x2 = self.stage1(x1)      # [B, 16, H/4, W/4]
-        x3 = self.stage2(x2)      # [B, 24, H/8, W/8]
-        x4 = self.stage3(x3)      # [B, 40, H/16, W/16]
-        x5 = self.stage4(x4)      # [B, 576, H/16, W/16]
+        x3 = self.stage2(self.stage1(self.stem(x)))
+        x4 = self.stage3(x3)
+        x5 = self.stage4(x4)
         
-        # Resize low-level features to match high-level features
+        # Align features to same spatial resolution
         x3_up = F.interpolate(x3, size=x5.shape[-2:], mode='bilinear', align_corners=False)
         x4_up = F.interpolate(x4, size=x5.shape[-2:], mode='bilinear', align_corners=False)
         
         # Feature fusion
-        fused = torch.cat([x5, x4_up, x3_up], dim=1)  # [B, 576+40+24, H/16, W/16]
+        fused = torch.cat([x5, x4_up, x3_up], dim=1)
         fused = self.fusion_relu(self.fusion_bn(self.fusion_conv(fused)))
         
-        # Decode to segmentation
+        # Decode to segmentation map
         seg_logits = self.decoder(fused)
         
         if not self.use_uncertainty:
             return seg_logits
         
-        # Generate uncertainty
         uncertainty = self.uncertainty_head(fused)
-        uncertainty = F.interpolate(
-            uncertainty, 
-            size=seg_logits.shape[-2:], 
-            mode='bilinear', 
-            align_corners=False
-        )
+        uncertainty = F.interpolate(uncertainty, size=seg_logits.shape[-2:], mode='bilinear', align_corners=False)
         
-        return {
-            'main': seg_logits,
-            'uncertainty': uncertainty
-        }
-    
+        return {'main': seg_logits, 'uncertainty': uncertainty}
+
     def count_parameters(self) -> int:
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
-    
-    def get_model_size_mb(self) -> float:
-        param_size = sum(p.numel() * p.element_size() for p in self.parameters())
-        buffer_size = sum(b.numel() * b.element_size() for b in self.buffers())
-        return (param_size + buffer_size) / (1024 * 1024)
+        return sum(p.numel() for p in self.parameters())
 
 
 def create_edge_model(
@@ -333,18 +359,25 @@ def create_edge_model(
     Factory function to create edge-optimized models.
     
     Args:
-        model_type: 'standard' or 'enhanced'
-        num_classes: Number of output classes
-        input_size: Input image size (not used directly but for reference)
+        model_type: 'standard', 'enhanced', or 'legacy'
+        num_classes: Number of segmentation classes
+        input_size: Input image size (not used in current implementation)
         use_uncertainty: Whether to include uncertainty estimation
-        pretrained: Use ImageNet pretrained backbone
-        
+        pretrained: Whether to use ImageNet pretrained backbone
+    
     Returns:
-        Edge-optimized model instance
+        Configured model instance
     """
     
     if model_type == "standard":
         model = EdgeLandingNet(
+            num_classes=num_classes,
+            backbone_pretrained=pretrained,
+            use_uncertainty=use_uncertainty
+        )
+    elif model_type == "legacy":
+        print("   Instantiating LEGACY EdgeLandingNet for backward compatibility.")
+        model = LegacyEdgeLandingNet(
             num_classes=num_classes,
             backbone_pretrained=pretrained,
             use_uncertainty=use_uncertainty
@@ -356,45 +389,37 @@ def create_edge_model(
             use_uncertainty=use_uncertainty
         )
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose 'standard' or 'enhanced'")
+        raise ValueError(f"Unknown model type: {model_type}. Choose 'standard', 'enhanced', or 'legacy'")
     
     return model
 
 
-def benchmark_model_speed(model: nn.Module, input_size: int = 512, device: str = 'cuda'):
-    """Benchmark model inference speed."""
-    import time
+# Additional utility functions
+def get_model_summary(model: nn.Module, input_size: tuple = (1, 3, 512, 512)) -> str:
+    """Generate a summary of model architecture and parameters."""
     
-    model.eval()
-    model = model.to(device)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
-    # Warm up
-    dummy_input = torch.randn(1, 3, input_size, input_size, device=device)
-    for _ in range(10):
-        with torch.no_grad():
-            _ = model(dummy_input)
+    summary = f"""
+Model Summary:
+- Total Parameters: {total_params:,}
+- Trainable Parameters: {trainable_params:,}
+- Model Size (MB): {total_params * 4 / 1024 / 1024:.2f}
+- Input Size: {input_size}
+"""
     
-    # Benchmark
-    torch.cuda.synchronize()
-    start_time = time.time()
+    return summary
+
+
+def optimize_for_mobile(model: nn.Module) -> nn.Module:
+    """Apply mobile-specific optimizations to the model."""
     
-    num_runs = 100
-    with torch.no_grad():
-        for _ in range(num_runs):
-            _ = model(dummy_input)
+    # Convert BatchNorm to more mobile-friendly operations if needed
+    # This is a placeholder for future mobile optimizations
+    warnings.warn("Mobile optimization not yet implemented", UserWarning)
     
-    torch.cuda.synchronize()
-    end_time = time.time()
-    
-    avg_time_ms = (end_time - start_time) / num_runs * 1000
-    fps = 1000 / avg_time_ms
-    
-    print(f"📊 Model Benchmark ({device}):")
-    print(f"   Average inference time: {avg_time_ms:.2f}ms")
-    print(f"   FPS: {fps:.1f}")
-    print(f"   Input size: {input_size}x{input_size}")
-    
-    return avg_time_ms, fps
+    return model
 
 
 if __name__ == "__main__":

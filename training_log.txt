@@ -1,0 +1,125 @@
+🚁 UAV Landing System - Universal Training
+==========================================
+🖥️  System Information:
+   Platform: Linux x86_64
+   Python: 3.11.11
+
+💾 Memory: 944.8 GB total, 827.6 GB available
+CPU: 120 cores (120 threads)
+
+🚀 GPU Information:
+   GPU 0: NVIDIA GeForce RTX 5090
+   Memory: 31.4 GB
+   Compute: 12.0
+
+⚙️  Optimized Training Configuration:
+   Device: cuda
+   Stage: 2
+   Classes: 6
+   Batch size: 4
+   Workers: 12
+   Persistent Workers: True
+   Prefetch Factor: 2
+   Mixed precision: True
+EdgeLandingNet initialized:
+   Classes: 6
+   Input size: 256x256
+   Parameters: 3,281,359
+   Uncertainty: True
+🚁 Universal Trainer initialized:
+   Device: cuda
+   Stage: 2 (6 classes)
+   Batch size: 4
+   Workers: 12
+   Persistent Workers: True
+   Prefetch Factor: 2
+   Mixed precision: True
+   W&B: True
+
+🔄 PROGRESSIVE TRAINING: Loading Stage 1 checkpoint...
+   From: outputs/stage1_best.pth
+   🔧 ADAPTING MODEL: 24 → 6 classes
+EdgeLandingNet initialized:
+   Classes: 24
+   Input size: 256x256
+   Parameters: 3,283,681
+   Uncertainty: True
+✅ Model adapted: 24 → 6 classes
+   Strategy: linear_projection
+   Layer adapted: seg_head.4
+   ✅ Model adapted from Stage 1 to Stage 2
+   📈 Previous mIoU: 0.2249
+   🎯 Stage 2 will build upon this foundation
+
+🚀 Running Stage 2: Landing Specialization (6-Class Adaptation)
+   🔄 Adapting from 24-class foundation to 6-class landing detection
+   🎯 Goal: Specialize for landing detection while preserving learned features
+   🔧 PERFORMANCE: Reducing workers from 12 to 6 for DroneDeploy dataset
+🚁 Loading DroneDeploy dataset for train...
+   Using 300x300 chips → 256x256 model input
+   Created RGB lookup table for 7 color mappings
+   📂 Loading cached chips: chips_8febb29b.pkl
+   ⚠️  Empty or invalid chips, regenerating...
+   Found 0 source images
+   Processing image batches: 0it [00:00, ?it/s]   Processing image batches: 0it [00:00, ?it/s]
+   Generated 0 chips in 0 batches
+   💾 Cached metadata: chips_8febb29b.pkl
+   Split distribution: train=0, val=0, test=0 source images
+⚠️  No chips available for distribution analysis
+   🚀 PERFORMANCE MODE: Pre-loading all training chips into memory...
+   Loading 0 chips...
+Pre-loading: 0it [00:00, ?it/s]Pre-loading: 0it [00:00, ?it/s]
+   ✅ Pre-loaded 0 chips into memory
+   Split train: 0 chips
+   Batch cache size: 50
+   Preloaded: True
+🚁 Loading DroneDeploy dataset for val...
+   Using 300x300 chips → 256x256 model input
+   Created RGB lookup table for 7 color mappings
+   📂 Loading cached chips: chips_8febb29b.pkl
+   ⚠️  Empty or invalid chips, regenerating...
+   Found 0 source images
+   Processing image batches: 0it [00:00, ?it/s]   Processing image batches: 0it [00:00, ?it/s]
+   Generated 0 chips in 0 batches
+   💾 Cached metadata: chips_8febb29b.pkl
+   Split distribution: train=0, val=0, test=0 source images
+⚠️  No chips available for distribution analysis
+   Split val: 0 chips
+   Batch cache size: 50
+   Preloaded: False
+🚁 Loading DroneDeploy dataset for test...
+   Using 300x300 chips → 256x256 model input
+   Created RGB lookup table for 7 color mappings
+   📂 Loading cached chips: chips_8febb29b.pkl
+   ⚠️  Empty or invalid chips, regenerating...
+   Found 0 source images
+   Processing image batches: 0it [00:00, ?it/s]   Processing image batches: 0it [00:00, ?it/s]
+Traceback (most recent call last):
+  File "/workspace/UAV-Markerless-Landing-Detection/train.py", line 1428, in main
+    results = trainer.train_stage(
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/UAV-Markerless-Landing-Detection/train.py", line 441, in train_stage
+    train_loader = DataLoader(
+                   ^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/dataloader.py", line 385, in __init__
+    sampler = RandomSampler(dataset, generator=generator)  # type: ignore[arg-type]
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/utils/data/sampler.py", line 156, in __init__
+    raise ValueError(
+ValueError: num_samples should be a positive integer value, but got num_samples=0
+   Generated 0 chips in 0 batches
+   💾 Cached metadata: chips_8febb29b.pkl
+   Split distribution: train=0, val=0, test=0 source images
+⚠️  No chips available for distribution analysis
+   Split test: 0 chips
+   Batch cache size: 50
+   Preloaded: False
+   📈 Training with 0 samples, 0 validation
+   🏷️  Using 6-class unified landing detection scheme
+
+🎯 6-Class Landing Specialization (Stage 2)
+   Epochs: 40, LR: 0.001
+   Train samples: 0
+   Val samples: 0
+
+❌ Training failed: num_samples should be a positive integer value, but got num_samples=0
