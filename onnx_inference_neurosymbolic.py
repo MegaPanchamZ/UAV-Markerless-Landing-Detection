@@ -54,18 +54,37 @@ from datasets.semantic_drone_dataset import create_semantic_drone_transforms
 class ONNXNeuroSymbolicInference:
     """ONNX Runtime inference with integrated neuro-symbolic reasoning."""
 
-    # CORRECTED: Class names and colors for the Stage 3 model.
-    CLASS_NAMES = [
-        'other', 'facade', 'road', 'vegetation', 'vehicle', 'roof'
-    ]
-    CLASS_COLORS = [
-        [128, 128, 128],  # other - gray
-        [128, 0, 0],      # facade - dark red
-        [128, 64, 128],   # road - purple
-        [0, 128, 0],      # vegetation - green
-        [64, 0, 128],     # vehicle - blue
-        [64, 64, 0]       # roof - olive
-    ]
+    def _get_class_mapping_for_stage(self, stage: int):
+        """Get class names and colors for the specified training stage."""
+        if stage == 2:
+            # Stage 2: Unified 6 classes for landing specialization
+            class_names = [
+                'ground', 'vegetation', 'building', 'water', 'car', 'clutter'
+            ]
+            class_colors = [
+                [128, 64, 128],   # ground - purple
+                [0, 128, 0],      # vegetation - green
+                [128, 0, 0],      # building - dark red
+                [0, 0, 128],      # water - dark blue
+                [64, 0, 128],     # car - blue
+                [128, 128, 128]   # clutter - gray
+            ]
+        elif stage == 3:
+            # Stage 3: 6-class urban specialization
+            class_names = [
+                'other', 'facade', 'road', 'vegetation', 'vehicle', 'roof'
+            ]
+            class_colors = [
+                [128, 128, 128],  # other - gray
+                [128, 0, 0],      # facade - dark red
+                [128, 64, 128],   # road - purple
+                [0, 128, 0],      # vegetation - green
+                [64, 0, 128],     # vehicle - blue
+                [64, 64, 0]       # roof - olive
+            ]
+        else:
+            raise ValueError(f"Invalid stage: {stage}. Only 2 or 3 are supported.")
+        return class_names, class_colors
 
     def __init__(
         self,
@@ -73,18 +92,23 @@ class ONNXNeuroSymbolicInference:
         input_size: Tuple[int, int] = (512, 512),
         confidence_threshold: float = 0.5,
         providers: Optional[List[str]] = None,
-        use_scallop: bool = True
+        use_scallop: bool = True,
+        stage: int = 3
     ):
         """Initialize ONNX inference engine with neuro-symbolic reasoning."""
-
+        
         if not HAS_ONNX:
             raise ImportError("ONNX Runtime not available. Install with: pip install onnxruntime or pip install onnxruntime-gpu")
-
+        
         self.model_path = onnx_model_path
         self.input_size = input_size
         self.confidence_threshold = confidence_threshold
         self.use_scallop = use_scallop and HAS_SCALLOP
+        self.stage = stage
 
+        # Get class mappings based on stage
+        self.CLASS_NAMES, self.CLASS_COLORS = self._get_class_mapping_for_stage(self.stage)
+        
         # Performance tracking
         self.inference_times = []
         self.processed_frames = 0
@@ -92,6 +116,7 @@ class ONNXNeuroSymbolicInference:
         print(f"🚁 ONNX Neuro-Symbolic UAV Landing System")
         print(f"   Model: {onnx_model_path}")
         print(f"   Input size: {input_size}")
+        print(f"   Stage: {self.stage}")
         print(f"   Neuro-symbolic: {'✅ Enabled' if self.use_scallop else '❌ Disabled'}")
 
         # Load ONNX model
@@ -151,14 +176,24 @@ class ONNXNeuroSymbolicInference:
 
     def _initialize_scallop(self):
         """Initialize Scallop reasoning context with UAV landing rules."""
-
+        
         if not HAS_SCALLOP:
             return None
-
+        
         print(f"🧠 Initializing Scallop neuro-symbolic reasoning...")
+        
+        # Define stage-specific surfaces for Scallop
+        if self.stage == 2:
+            safe_surfaces = '{"ground", "vegetation"}'
+            hazardous_surfaces = '{"building", "water", "car"}'
+            uncertain_surfaces = '{"clutter"}'
+        else:  # Default to stage 3
+            safe_surfaces = '{"road", "vegetation", "roof"}'
+            hazardous_surfaces = '{"vehicle", "facade"}'
+            uncertain_surfaces = '{"other"}'
 
         # Scallop program for UAV landing safety
-        scallop_program = """
+        scallop_program = f"""
           // Type declarations
           type surface_area(String, f32)
           type max_surface_area(f32)
@@ -176,10 +211,10 @@ class ONNXNeuroSymbolicInference:
           type prediction_reliable()
           type landing_recommendation(String)
 
-          // Define safe and hazardous surfaces
-          rel safe_surface = {"road", "vegetation", "roof"}
-          rel hazardous_surface = {"vehicle", "facade"}
-          rel uncertain_surface = {"other"}
+          // Define safe and hazardous surfaces based on stage
+          rel safe_surface = {safe_surfaces}
+          rel hazardous_surface = {hazardous_surfaces}
+          rel uncertain_surface = {uncertain_surfaces}
 
           // Find max surface area
           rel max_surface_area(a) = a := max(area: surface_area(_, area))
@@ -689,6 +724,8 @@ def main():
                         help='Confidence threshold for predictions')
     parser.add_argument('--no_scallop', action='store_true',
                         help='Disable Scallop neuro-symbolic reasoning')
+    parser.add_argument('--stage', type=int, choices=[2, 3], default=3,
+                        help='Model training stage (2 or 3) to determine class mapping. Defaults to 3.')
 
     # Input options
     input_group = parser.add_mutually_exclusive_group()
@@ -728,9 +765,10 @@ def main():
             input_size=tuple(args.input_size),
             confidence_threshold=args.confidence_threshold,
             providers=args.providers,
-            use_scallop=not args.no_scallop
+            use_scallop=not args.no_scallop,
+            stage=args.stage
         )
-
+        
         if args.benchmark:
             # Performance benchmark
             stats = inference_engine.benchmark_performance(args.benchmark_iterations)
@@ -750,7 +788,8 @@ def main():
                         'input_size': args.input_size,
                         'confidence_threshold': args.confidence_threshold,
                         'scallop_enabled': not args.no_scallop,
-                        'providers': args.providers
+                        'providers': args.providers,
+                        'stage': args.stage
                     },
                     'timestamp': time.time()
                 }, f, indent=2)
