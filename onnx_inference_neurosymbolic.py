@@ -231,7 +231,7 @@ class ONNXNeuroSymbolicInference:
           // Landing zone evaluation
           rel local_area_safe(x, y) = nearby_surface(x, y, s) and safe_surface(s)
           rel sufficient_space(x, y) = landing_space_available(x, y, space) and space > 20
-          rel high_confidence_prediction(x, y) = prediction_confidence(x, y, c) and c > 0.7
+          rel high_confidence_prediction(x, y) = prediction_confidence(x, y, c) and c > 0.5
 
           rel suitable_landing_zone(x, y) =
             local_area_safe(x, y) and
@@ -244,7 +244,7 @@ class ONNXNeuroSymbolicInference:
           rel mission_safety_level("danger") = area_safety_score(s) and s <= 0.4
 
           // Uncertainty handling
-          rel prediction_reliable() = avg_uncertainty(u) and u < 0.3
+          rel prediction_reliable() = avg_uncertainty(u) and u < 0.5
 
           // Landing recommendations
           rel landing_recommendation("proceed_landing") = mission_safety_level("safe") and prediction_reliable()
@@ -349,66 +349,77 @@ class ONNXNeuroSymbolicInference:
 
     def analyze_landing_zones(self, predictions: np.ndarray, confidence_map: Optional[np.ndarray] = None) -> Dict:
         """Analyze predictions to find suitable landing zones."""
-
+        
         # Calculate class statistics
         class_stats = {}
         total_pixels = predictions.size
-
+        
         for class_idx, class_name in enumerate(self.CLASS_NAMES):
             mask = predictions == class_idx
             pixel_count = np.sum(mask)
             percentage = (pixel_count / total_pixels) * 100
-
+            
             class_stats[class_name] = {
                 'pixel_count': int(pixel_count),
                 'percentage': float(percentage),
                 'mask': mask
             }
+        
+        # Define safe classes based on stage
+        if self.stage == 2:
+            safe_classes = ['ground']
+        else: # stage 3
+            safe_classes = ['road', 'vegetation', 'roof']
 
-        # Find safe landing areas
-        safe_classes = ['road', 'vegetation', 'roof']
-        safe_mask = np.zeros_like(predictions, dtype=bool)
-
+        # Find semantically safe areas
+        semantic_safe_mask = np.zeros_like(predictions, dtype=bool)
         for class_name in safe_classes:
             if class_name in class_stats:
-                safe_mask |= class_stats[class_name]['mask']
-
-        # Apply confidence filtering if available
-        if confidence_map is not None:
-            high_confidence_mask = confidence_map > self.confidence_threshold
-            safe_mask &= high_confidence_mask
-
-        # Find connected components for landing zones
-        safe_mask_uint8 = safe_mask.astype(np.uint8)
-        num_labels, labels = cv2.connectedComponents(safe_mask_uint8)
-
+                semantic_safe_mask |= class_stats[class_name]['mask']
+        
+        # Find connected components from semantic mask
+        num_labels, labels = cv2.connectedComponents(semantic_safe_mask.astype(np.uint8))
+        
         landing_zones = []
-        for label in range(1, num_labels):  # Skip background (label 0)
-            zone_mask = labels == label
+        confident_safe_mask = np.zeros_like(predictions, dtype=bool)
+
+        for label in range(1, num_labels):  # Skip background
+            zone_mask = (labels == label)
             zone_area = np.sum(zone_mask)
 
-            if zone_area > 100:  # Minimum zone size
-                # Find centroid
-                y_coords, x_coords = np.where(zone_mask)
-                centroid_x = int(np.mean(x_coords))
-                centroid_y = int(np.mean(y_coords))
+            if zone_area <= 100: # Min zone size
+                continue
 
-                landing_zones.append({
-                    'centroid': (centroid_x, centroid_y),
-                    'area': int(zone_area),
-                    'mask': zone_mask
-                })
-
+            # Filter zones by their average confidence
+            if confidence_map is not None:
+                zone_avg_confidence = np.mean(confidence_map[zone_mask])
+                if zone_avg_confidence < self.confidence_threshold:
+                    continue # Skip low-confidence zones
+            
+            # If we reach here, the zone is good. Add it to the final confident mask.
+            confident_safe_mask |= zone_mask
+            
+            # Find centroid for this confident zone
+            y_coords, x_coords = np.where(zone_mask)
+            centroid_x = int(np.mean(x_coords))
+            centroid_y = int(np.mean(y_coords))
+            
+            landing_zones.append({
+                'centroid': (centroid_x, centroid_y),
+                'area': int(zone_area),
+                'mask': zone_mask
+            })
+        
         # Sort by area (largest first)
         landing_zones.sort(key=lambda x: x['area'], reverse=True)
-
+        
         return {
             'class_stats': class_stats,
-            'safe_mask': safe_mask,
+            'safe_mask': confident_safe_mask, # Use this for visualization
             'landing_zones': landing_zones,
-            'safe_percentage': float(np.sum(safe_mask) / total_pixels * 100)
+            'safe_percentage': float(np.sum(confident_safe_mask) / total_pixels * 100)
         }
-
+    
     def run_scallop_reasoning(self, analysis: Dict) -> Dict:
         """Run Scallop-based neuro-symbolic reasoning."""
 
