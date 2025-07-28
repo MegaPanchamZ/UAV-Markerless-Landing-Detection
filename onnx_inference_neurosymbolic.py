@@ -184,9 +184,10 @@ class ONNXNeuroSymbolicInference:
         
         # Define stage-specific surfaces for Scallop
         if self.stage == 2:
-            safe_surfaces = '{"ground", "vegetation"}'
+            # Stage 2: `vegetation` is ambiguous (grass vs. trees), so treat it as uncertain.
+            safe_surfaces = '{"ground"}'
             hazardous_surfaces = '{"building", "water", "car"}'
-            uncertain_surfaces = '{"clutter"}'
+            uncertain_surfaces = '{"clutter", "vegetation"}'
         else:  # Default to stage 3
             safe_surfaces = '{"road", "vegetation", "roof"}'
             hazardous_surfaces = '{"vehicle", "facade"}'
