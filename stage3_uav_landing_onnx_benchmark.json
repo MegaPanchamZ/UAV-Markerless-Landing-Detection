@@ -1,0 +1,23 @@
+{
+  "model_path": "model_pths/stage3_uav_landing.onnx",
+  "benchmark_stats": {
+    "total_time_s": 3.4982504844665527,
+    "mean_ms": 20.228829383850098,
+    "std_ms": 1.5834373022301278,
+    "min_ms": 17.86208152770996,
+    "max_ms": 29.515743255615234,
+    "median_ms": 19.826531410217285,
+    "fps": 28.585717473358393,
+    "throughput_fps": 49.43439785983665
+  },
+  "configuration": {
+    "input_size": [
+      512,
+      512
+    ],
+    "confidence_threshold": 0.5,
+    "scallop_enabled": true,
+    "providers": null
+  },
+  "timestamp": 1753710556.2541552
+}

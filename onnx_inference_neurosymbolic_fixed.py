@@ -156,33 +156,13 @@ class ONNXNeuroSymbolicInference:
         
         # Scallop program for UAV landing safety
         scallop_program = """
-          // Type declarations
-          type surface_area(String, f32)
-          type max_surface_area(f32)
-          type dominant_surface(String)
-          type area_safety_score(f32)
-          type nearby_surface(i32, i32, String)
-          type landing_space_available(i32, i32, i32)
-          type prediction_confidence(i32, i32, f32)
-          type avg_uncertainty(f32)
-          type local_area_safe(i32, i32)
-          type sufficient_space(i32, i32)
-          type high_confidence_prediction(i32, i32)
-          type suitable_landing_zone(i32, i32)
-          type mission_safety_level(String)
-          type prediction_reliable()
-          type landing_recommendation(String)
-
-          // Define safe and hazardous surfaces
+          // Define safe and hazardous surfaces based on our 6-class model
           rel safe_surface = {"road", "vegetation", "roof"}
           rel hazardous_surface = {"vehicle", "facade"}
           rel uncertain_surface = {"other"}
 
-          // Find max surface area
-          rel max_surface_area(a) = a := max(area: surface_area(_, area))
-
-          // Find the dominant surface
-          rel dominant_surface(s) = surface_area(s, a) and max_surface_area(a)
+          // Dominant surface analysis
+          rel dominant_surface(s) = surface_area(s, a) and a == max(a: surface_area(_, a))
 
           // Assign safety scores based on dominant surface
           rel area_safety_score(0.9) = dominant_surface(s) and safe_surface(s)
@@ -248,7 +228,7 @@ class ONNXNeuroSymbolicInference:
         
         return input_array.astype(np.float32)
     
-    def run_onnx_inference(self, input_array: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def run_onnx_inference(self, input_array: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
         """Run ONNX inference on preprocessed input."""
         
         start_time = time.time()
@@ -274,7 +254,7 @@ class ONNXNeuroSymbolicInference:
     def postprocess_outputs(
         self, 
         main_output: np.ndarray, 
-        uncertainty_output: np.ndarray
+        uncertainty_output: Optional[np.ndarray]
     ) -> Dict:
         """Post-process ONNX outputs into usable format."""
         
@@ -373,59 +353,57 @@ class ONNXNeuroSymbolicInference:
             return {'reasoning_enabled': False}
         
         try:
-            # Clone the context to keep the base program but allow for new facts
-            reasoning_ctx = self.scallop_ctx.clone()
+            # Clear previous facts
+            self.scallop_ctx.clear_facts()
             
             # Add surface area facts
-            surface_area_facts = []
             for class_name, stats in analysis['class_stats'].items():
-                if stats['percentage'] > 1.0:
-                    surface_area_facts.append((str(class_name), float(stats['percentage'])))
-            if surface_area_facts:
-                reasoning_ctx.add_facts("surface_area", surface_area_facts)
-
-            # Add landing zone facts
-            landing_space_facts = []
-            nearby_surface_facts = []
-            prediction_confidence_facts = []
-
-            for i, zone in enumerate(analysis['landing_zones'][:5]):
-                x, y = int(zone['centroid'][0]), int(zone['centroid'][1])
-                area = int(zone['area'])
-                landing_space_facts.append((x, y, area))
-
-                # Simplified nearby surface
-                dominant_class = max(analysis['class_stats'].items(), key=lambda item: item[1]['percentage'])[0]
-                nearby_surface_facts.append((x, y, str(dominant_class)))
-
-                # Per-zone confidence
-                if 'confidence_map' in analysis and analysis['confidence_map'] is not None:
-                    zone_confidence = float(np.mean(analysis['confidence_map'][zone['mask']]))
-                    prediction_confidence_facts.append((x, y, zone_confidence))
-
-            if landing_space_facts:
-                reasoning_ctx.add_facts("landing_space_available", landing_space_facts)
-            if nearby_surface_facts:
-                reasoning_ctx.add_facts("nearby_surface", nearby_surface_facts)
-            if prediction_confidence_facts:
-                reasoning_ctx.add_facts("prediction_confidence", prediction_confidence_facts)
+                if stats['percentage'] > 1.0:  # Only significant areas
+                    self.scallop_ctx.add_facts("surface_area", [(class_name, stats['percentage'])])
             
-            # Add overall confidence fact
+            # Add landing zone facts
+            for i, zone in enumerate(analysis['landing_zones'][:5]):  # Top 5 zones
+                x, y = zone['centroid']
+                area = zone['area']
+                self.scallop_ctx.add_facts("landing_space_available", [(x, y, area)])
+                
+                # Add nearby surface facts (simplified)
+                dominant_class = None
+                max_pixels = 0
+                for class_name, stats in analysis['class_stats'].items():
+                    if stats['percentage'] > max_pixels:
+                        max_pixels = stats['percentage']
+                        dominant_class = class_name
+                
+                if dominant_class:
+                    self.scallop_ctx.add_facts("nearby_surface", [(x, y, dominant_class)])
+            
+            # Add confidence facts (if available)
             if 'confidence_map' in analysis and analysis['confidence_map'] is not None:
                 avg_confidence = float(np.mean(analysis['confidence_map']))
-                reasoning_ctx.add_facts("avg_uncertainty", [(1.0 - avg_confidence,)])
-
+                self.scallop_ctx.add_facts("avg_uncertainty", [(1.0 - avg_confidence,)])
+                
+                # Add per-zone confidence
+                for zone in analysis['landing_zones'][:5]:
+                    x, y = zone['centroid']
+                    zone_confidence = float(np.mean(analysis['confidence_map'][zone['mask']]))
+                    self.scallop_ctx.add_facts("prediction_confidence", [(x, y, zone_confidence)])
+            
+            # Add default environmental facts
+            self.scallop_ctx.add_facts("current_weather", [("clear",)])
+            self.scallop_ctx.add_facts("uav_capability", [("small_drone",)])
+            
             # Run reasoning
-            reasoning_ctx.run()
+            self.scallop_ctx.run()
             
             # Extract results
             reasoning_results = {
                 'reasoning_enabled': True,
-                'area_safety_score': list(reasoning_ctx.relation("area_safety_score")),
-                'suitable_landing_zones': list(reasoning_ctx.relation("suitable_landing_zone")),
-                'mission_safety_level': list(reasoning_ctx.relation("mission_safety_level")),
-                'landing_recommendation': list(reasoning_ctx.relation("landing_recommendation")),
-                'prediction_reliable': list(reasoning_ctx.relation("prediction_reliable"))
+                'area_safety_score': list(self.scallop_ctx.relation("area_safety_score")),
+                'suitable_landing_zones': list(self.scallop_ctx.relation("suitable_landing_zone")),
+                'mission_safety_level': list(self.scallop_ctx.relation("mission_safety_level")),
+                'landing_recommendation': list(self.scallop_ctx.relation("landing_recommendation")),
+                'prediction_reliable': list(self.scallop_ctx.relation("prediction_reliable"))
             }
             
             return reasoning_results

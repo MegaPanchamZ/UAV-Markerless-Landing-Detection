@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "uav-landing-project"
 version = "0.1.0"
@@ -117,3 +121,7 @@ mps = [
 intel = [
     "intel-extension-for-pytorch",  # For Intel optimization
 ]
+
+# Note: Scallop for neuro-symbolic computing should be installed separately:
+# For source install: pip install git+https://github.com/scallop-lang/scallop.git
+# Or: pip install scallopy (if available on PyPI)
